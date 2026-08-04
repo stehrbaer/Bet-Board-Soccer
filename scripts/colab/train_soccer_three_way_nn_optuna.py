@@ -22,9 +22,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import joblib
@@ -32,6 +34,25 @@ import numpy as np
 import optuna
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
+
+
+LOGGER = logging.getLogger("soccer_nn")
+
+LEAGUE_ALIASES = {
+    "eng1": "eng_1",
+    "epl": "eng_1",
+    "premierleague": "eng_1",
+    "eng2": "eng_2",
+    "championship": "eng_2",
+    "esp1": "esp_1",
+    "laliga": "esp_1",
+    "ger1": "ger_1",
+    "bundesliga": "ger_1",
+    "ita1": "ita_1",
+    "seriea": "ita_1",
+    "fra1": "fra_1",
+    "ligue1": "fra_1",
+}
 
 
 try:
@@ -82,6 +103,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Optuna-tuned neural soccer 1X2 model.")
     parser.add_argument("--input", required=True, help="Gold dataset root or local parquet file.")
     parser.add_argument("--output-dir", default="outputs/soccer_three_way_nn")
+    parser.add_argument(
+        "--league",
+        default="all",
+        help="League selector such as eng1, eng_1, epl, esp1, ger1, ita1, fra1, or all.",
+    )
     parser.add_argument("--competitions", default="", help="Comma-separated competition ids, e.g. eng.1,esp.1")
     parser.add_argument("--seasons", default="", help="Comma-separated seasons to load. Empty loads all under input.")
     parser.add_argument("--train-through-season", default="2024")
@@ -98,8 +124,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
 def csv_list(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def normalize_league(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_").replace(".", "_").replace(" ", "")
+    if normalized == "all":
+        return "all"
+    return LEAGUE_ALIASES.get(normalized, normalized)
+
+
+def resolve_competitions(args: argparse.Namespace) -> list[str]:
+    competitions = csv_list(args.competitions)
+    if competitions:
+        return [normalize_league(comp) for comp in competitions]
+    leagues = [normalize_league(league) for league in csv_list(args.league)]
+    if not leagues or leagues == ["all"]:
+        return []
+    if "all" in leagues:
+        raise SystemExit("--league all cannot be combined with specific leagues.")
+    return leagues
+
+
+def default_partition_seasons(train_through_season: str, test_season: str) -> str:
+    start = 2021
+    try:
+        end = max(int(train_through_season), int(test_season))
+    except ValueError:
+        return ""
+    return ",".join(str(season) for season in range(start, end + 1))
 
 
 def s3_storage_options() -> dict[str, Any] | None:
@@ -153,16 +215,30 @@ def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
 def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) -> pd.DataFrame:
     filesystem = s3_filesystem() if root.startswith("s3://") else None
     paths = partition_paths(root, competitions, seasons)
-    if filesystem is not None and not competitions and not seasons and not root.endswith(".parquet"):
-        parquet_keys = sorted(filesystem.glob(f"{s3_key(root).rstrip('/')}/**/*.parquet"))
+    if filesystem is not None and not competitions and not root.endswith(".parquet"):
+        root_key = s3_key(root).rstrip("/")
+        if seasons:
+            parquet_keys = []
+            for season in seasons:
+                parquet_keys.extend(sorted(filesystem.glob(f"{root_key}/competition=*/season={season}/*.parquet")))
+        else:
+            parquet_keys = sorted(filesystem.glob(f"{root_key}/**/*.parquet"))
         paths = [f"s3://{path}" for path in parquet_keys]
-    print(json.dumps({"loading_parquet_files": len(paths), "input": root, "competitions": competitions, "seasons": seasons}))
+    LOGGER.info(
+        "loading parquet files count=%s input=%s competitions=%s seasons=%s",
+        len(paths),
+        root,
+        competitions or ["all"],
+        seasons or ["all"],
+    )
     frames: list[pd.DataFrame] = []
-    for path in paths:
+    started = time.monotonic()
+    for idx, path in enumerate(paths, start=1):
         try:
+            LOGGER.info("reading parquet %s/%s %s", idx, len(paths), path)
             frames.append(read_parquet_path(path, filesystem))
         except FileNotFoundError:
-            print(f"missing partition: {path}")
+            LOGGER.warning("missing partition: %s", path)
     if not frames:
         raise RuntimeError("No input rows loaded.")
     df = pd.concat(frames, ignore_index=True)
@@ -171,6 +247,7 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
     df = df.dropna(subset=["kickoff_utc", "result_target"]).copy()
     df["result_target"] = pd.to_numeric(df["result_target"], errors="coerce").astype("Int64")
     df = df[df["result_target"].isin([0, 1, 2])].copy()
+    LOGGER.info("loaded rows=%s elapsed_seconds=%.1f", len(df), time.monotonic() - started)
     return df.sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
 
 
@@ -260,6 +337,7 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
     tf, *_, EarlyStopping = tf_pack
 
     def objective(trial: optuna.Trial) -> float:
+        LOGGER.info("trial %s started", trial.number)
         tf.keras.backend.clear_session()
         tf.random.set_seed(args.seed)
         np.random.seed(args.seed)
@@ -271,6 +349,15 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             fold = prepare_fold(train_df, val_df, feature_cols)
             model = build_model(tf_pack, fold.x_train.shape[1], params)
             early = EarlyStopping(monitor="val_loss", patience=args.patience, restore_best_weights=True)
+            LOGGER.info(
+                "trial %s fold %s/%s train_rows=%s val_rows=%s batch_size=%s",
+                trial.number,
+                fold_idx + 1,
+                len(folds),
+                len(train_df),
+                len(val_df),
+                params["batch_size"],
+            )
             model.fit(
                 fold.x_train,
                 fold.y_train,
@@ -282,6 +369,14 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             )
             probs = model.predict(fold.x_val, verbose=0)
             metrics = evaluate_probs(fold.y_val, probs)
+            LOGGER.info(
+                "trial %s fold %s metrics log_loss=%.5f accuracy=%.4f brier=%.5f",
+                trial.number,
+                fold_idx + 1,
+                metrics["log_loss"],
+                metrics["accuracy"],
+                metrics["multiclass_brier"],
+            )
             trial.set_user_attr(f"fold_{fold_idx}", metrics)
             scores.append(-metrics["log_loss"])
             trial.report(float(np.mean(scores)), step=fold_idx)
@@ -294,6 +389,7 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
 
 def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str], params, tf_pack, args):
     _, *_, EarlyStopping = tf_pack
+    LOGGER.info("final training started train_rows=%s test_rows=%s features=%s", len(train_df), len(test_df), len(feature_cols))
     fold = prepare_fold(train_df, test_df, feature_cols)
     model = build_model(tf_pack, fold.x_train.shape[1], params)
     early = EarlyStopping(monitor="val_loss", patience=args.patience, restore_best_weights=True)
@@ -308,6 +404,12 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
     )
     probs = model.predict(fold.x_val, verbose=0)
     metrics = evaluate_probs(fold.y_val, probs)
+    LOGGER.info(
+        "final test metrics log_loss=%.5f accuracy=%.4f brier=%.5f",
+        metrics["log_loss"],
+        metrics["accuracy"],
+        metrics["multiclass_brier"],
+    )
     prediction_frame = test_df[
         ["match_id", "competition_id", "season", "kickoff_utc", "home_team_id", "away_team_id", "result_target"]
     ].copy()
@@ -320,6 +422,7 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
 
 
 def main() -> int:
+    setup_logging()
     args = parse_args()
     if args.smoke:
         args.n_trials = min(args.n_trials, 3)
@@ -328,17 +431,32 @@ def main() -> int:
         args.n_folds = min(args.n_folds, 2)
         args.val_size = min(args.val_size, 80)
         args.min_train_size = min(args.min_train_size, 160)
-        if not args.competitions and not args.seasons:
-            args.competitions = "eng_1"
+        if args.league == "all" and not args.competitions and not args.seasons:
+            args.league = "eng1"
             args.seasons = "2021,2022,2023,2024,2025"
 
-    competitions = csv_list(args.competitions)
+    competitions = resolve_competitions(args)
     seasons = csv_list(args.seasons)
-    if (competitions and not seasons) or (seasons and not competitions):
-        raise SystemExit("--competitions and --seasons should be provided together for partitioned loading.")
+    if competitions and not seasons:
+        args.seasons = default_partition_seasons(args.train_through_season, args.test_season)
+        seasons = csv_list(args.seasons)
+        LOGGER.info("defaulting seasons for league run to %s", seasons)
+    if competitions and not seasons:
+        raise SystemExit("--competitions requires --seasons so the script can target partition files.")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info(
+        "run config league=%s competitions=%s seasons=%s train_through=%s test=%s trials=%s epochs=%s smoke=%s",
+        args.league,
+        competitions or ["all"],
+        seasons or ["all"],
+        args.train_through_season,
+        args.test_season,
+        args.n_trials,
+        args.epochs,
+        args.smoke,
+    )
     tf_pack = require_tensorflow()
     tf_pack[0].random.set_seed(args.seed)
     np.random.seed(args.seed)
@@ -353,11 +471,14 @@ def main() -> int:
     if not feature_cols:
         raise RuntimeError("No numeric feature columns selected.")
     folds = make_walkforward_folds(train_all, args.n_folds, args.val_size, args.min_train_size)
+    LOGGER.info("selected features=%s folds=%s", len(feature_cols), len(folds))
     print(json.dumps({"rows": len(df), "train_rows": len(train_all), "test_rows": len(test), "features": len(feature_cols)}, indent=2))
 
     pruner = optuna.pruners.MedianPruner(n_startup_trials=max(2, min(5, args.n_trials // 4)), n_warmup_steps=1)
     study = optuna.create_study(direction="maximize", pruner=pruner)
+    LOGGER.info("optuna optimization started trials=%s folds=%s", args.n_trials, len(folds))
     study.optimize(objective_factory(train_all, folds, feature_cols, tf_pack, args), n_trials=args.n_trials)
+    LOGGER.info("optuna optimization finished best_value=%.5f best_params=%s", study.best_value, study.best_params)
 
     model, fold, test_metrics, predictions = train_final_model(
         df=df,

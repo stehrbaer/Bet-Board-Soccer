@@ -31,12 +31,38 @@ If using the full repo in Colab, run it from the repo root.
 ```bash
 python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
-  --competitions eng.1,esp.1 \
-  --seasons 2021,2022,2023,2024,2025 \
-  --train-through-season 2024 \
-  --test-season 2025 \
   --output-dir outputs/smoke_soccer_nn \
   --smoke
+```
+
+By default, `--smoke` uses `--league eng1` and seasons `2021-2025`.
+
+## League Runs
+
+Use `--league` for normal Colab runs. Supported aliases include `eng1`, `epl`, `eng_1`, `esp1`, `ger1`, `ita1`, `fra1`, and `all`.
+
+```bash
+python scripts/colab/train_soccer_three_way_nn_optuna.py \
+  --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
+  --league eng1 \
+  --train-through-season 2024 \
+  --test-season 2025 \
+  --epochs 50 \
+  --n-trials 25 \
+  --output-dir outputs/eng1_soccer_nn
+```
+
+Use `all` to train on every available league:
+
+```bash
+python scripts/colab/train_soccer_three_way_nn_optuna.py \
+  --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
+  --league all \
+  --train-through-season 2024 \
+  --test-season 2025 \
+  --epochs 50 \
+  --n-trials 25 \
+  --output-dir outputs/all_soccer_nn
 ```
 
 ## Full Run
@@ -44,8 +70,8 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
 ```bash
 python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
-  --competitions eng.1,esp.1,ger.1,ita.1,fra.1,eng.2,ger.2,ita.2,por.1 \
-  --seasons 2020,2021,2022,2023,2024,2025 \
+  --league all \
+  --seasons 2021,2022,2023,2024,2025 \
   --train-through-season 2024 \
   --test-season 2025 \
   --max-features 800 \
@@ -75,4 +101,3 @@ Upload these artifacts back to DigitalOcean after the run under:
 ```text
 s3://betboard-ml-artifacts/soccer-prediction-data/models/neural_three_way/run_id=<run_id>/
 ```
-
