@@ -138,6 +138,20 @@ def setup_logging() -> None:
     )
 
 
+def add_file_logging(output_dir: Path) -> Path:
+    log_path = output_dir / "training.log"
+    if not any(isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path for handler in LOGGER.handlers):
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+        LOGGER.addHandler(file_handler)
+    return log_path
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+
+
 def csv_list(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
@@ -335,6 +349,50 @@ def evaluate_probs(y_true_onehot: np.ndarray, p_pred: np.ndarray) -> dict[str, f
     return metrics
 
 
+def dataset_profile(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str]) -> dict[str, Any]:
+    return {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "train_rows": len(train_df),
+        "test_rows": len(test_df),
+        "features": len(feature_cols),
+        "season_counts": df["season"].astype(str).value_counts().sort_index().to_dict(),
+        "competition_counts": df["competition_id"].astype(str).value_counts().sort_index().to_dict(),
+        "target_counts": df["result_target"].astype(str).value_counts().sort_index().to_dict(),
+        "train_date_min": train_df["kickoff_utc"].min(),
+        "train_date_max": train_df["kickoff_utc"].max(),
+        "test_date_min": test_df["kickoff_utc"].min(),
+        "test_date_max": test_df["kickoff_utc"].max(),
+    }
+
+
+def save_trial_progress(output_dir: Path):
+    def callback(study: optuna.Study, trial: optuna.Trial) -> None:
+        trials_path = output_dir / "optuna_trials.csv"
+        study.trials_dataframe().to_csv(trials_path, index=False)
+        payload = {
+            "completed_trials": len([item for item in study.trials if item.state.is_finished()]),
+            "last_trial": trial.number,
+            "last_trial_state": str(trial.state),
+        }
+        try:
+            best_trial = study.best_trial
+        except ValueError:
+            best_trial = None
+        if best_trial is not None:
+            payload.update(
+                {
+                    "best_trial": best_trial.number,
+                    "best_value": study.best_value,
+                    "best_params": study.best_params,
+                }
+            )
+        write_json(output_dir / "best_trial_so_far.json", payload)
+        LOGGER.info("saved trial progress to %s", trials_path)
+
+    return callback
+
+
 def trial_params(trial: optuna.Trial) -> dict[str, Any]:
     return {
         "n_units_1": trial.suggest_categorical("n_units_1", [64, 128, 256, 384]),
@@ -462,6 +520,7 @@ def main() -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = add_file_logging(output_dir)
     LOGGER.info(
         "run config league=%s competitions=%s seasons=%s train_through=%s test=%s trials=%s epochs=%s smoke=%s",
         args.league,
@@ -472,6 +531,28 @@ def main() -> int:
         args.n_trials,
         args.epochs,
         args.smoke,
+    )
+    write_json(
+        output_dir / "run_config.json",
+        {
+            "input": args.input,
+            "output_dir": str(output_dir),
+            "league": args.league,
+            "competitions": competitions or ["all"],
+            "seasons": seasons or ["all"],
+            "train_through_season": args.train_through_season,
+            "test_season": args.test_season,
+            "max_features": args.max_features,
+            "n_folds": args.n_folds,
+            "val_size": args.val_size,
+            "min_train_size": args.min_train_size,
+            "epochs": args.epochs,
+            "n_trials": args.n_trials,
+            "patience": args.patience,
+            "seed": args.seed,
+            "smoke": args.smoke,
+            "log_file": str(log_path),
+        },
     )
     tf_pack = require_tensorflow()
     tf_pack[0].random.set_seed(args.seed)
@@ -489,11 +570,18 @@ def main() -> int:
     folds = make_walkforward_folds(train_all, args.n_folds, args.val_size, args.min_train_size)
     LOGGER.info("selected features=%s folds=%s", len(feature_cols), len(folds))
     print(json.dumps({"rows": len(df), "train_rows": len(train_all), "test_rows": len(test), "features": len(feature_cols)}, indent=2))
+    features_path = output_dir / "feature_columns.json"
+    features_path.write_text(json.dumps(feature_cols, indent=2) + "\n")
+    write_json(output_dir / "dataset_profile.json", dataset_profile(df, train_all, test, feature_cols))
 
     pruner = optuna.pruners.MedianPruner(n_startup_trials=max(2, min(5, args.n_trials // 4)), n_warmup_steps=1)
     study = optuna.create_study(direction="maximize", pruner=pruner)
     LOGGER.info("optuna optimization started trials=%s folds=%s", args.n_trials, len(folds))
-    study.optimize(objective_factory(train_all, folds, feature_cols, tf_pack, args), n_trials=args.n_trials)
+    study.optimize(
+        objective_factory(train_all, folds, feature_cols, tf_pack, args),
+        n_trials=args.n_trials,
+        callbacks=[save_trial_progress(output_dir)],
+    )
     LOGGER.info("optuna optimization finished best_value=%.5f best_params=%s", study.best_value, study.best_params)
 
     model, fold, test_metrics, predictions = train_final_model(
@@ -511,13 +599,11 @@ def main() -> int:
     predictions_path = output_dir / "test_predictions.parquet"
     trials_path = output_dir / "optuna_trials.csv"
     summary_path = output_dir / "summary.json"
-    features_path = output_dir / "feature_columns.json"
 
     model.save(model_path)
     joblib.dump({"imputer": fold.imputer, "scaler": fold.scaler, "feature_names": feature_cols}, preprocessing_path)
     predictions.to_parquet(predictions_path, index=False)
     study.trials_dataframe().to_csv(trials_path, index=False)
-    features_path.write_text(json.dumps(feature_cols, indent=2) + "\n")
     config = TrainingConfig(
         input=args.input,
         output_dir=str(output_dir),

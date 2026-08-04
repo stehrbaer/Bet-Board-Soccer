@@ -85,14 +85,23 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
 
 ## Artifacts
 
-The script writes:
+The script writes these files early, before the model is complete:
+
+```text
+run_config.json
+training.log
+dataset_profile.json
+feature_columns.json
+optuna_trials.csv
+best_trial_so_far.json
+```
+
+The final successful run also writes:
 
 ```text
 soccer_three_way_nn.keras
 preprocessing.joblib
 test_predictions.parquet
-optuna_trials.csv
-feature_columns.json
 summary.json
 ```
 
