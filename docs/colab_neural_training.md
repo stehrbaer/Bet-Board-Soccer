@@ -132,3 +132,18 @@ This writes:
 first_5_weeks_predictions.csv
 first_5_weeks_summary.json
 ```
+
+## Future Fixtures
+
+Fetch the first five weeks of the 2026-27 EPL schedule from ESPN:
+
+```bash
+python scripts/colab/fetch_espn_fixtures.py \
+  --league eng1 \
+  --start-date 2026-08-21 \
+  --end-date 2026-09-30 \
+  --weeks 5 \
+  --output-dir outputs/fixtures/espn_eng1_2026
+```
+
+This writes raw ESPN JSON plus normalized fixture CSVs. These fixtures still need prematch features before the neural model can score them.

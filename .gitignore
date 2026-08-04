@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+outputs/
 data/local_cache/*
 data/quarantine/*
 data/temp/*

@@ -11,6 +11,13 @@ sources:
       - fixtures
       - teams
       - standings
+  espn:
+    enabled: true
+    base_url: https://site.api.espn.com/apis/site/v2/sports/soccer
+    purpose:
+      - fixtures
+      - schedules
+      - teams
   open_meteo:
     enabled: false
     purpose:
@@ -28,4 +35,3 @@ sources:
     api_key_env: ODDS_API_KEY
     purpose:
       - upcoming_odds
-
