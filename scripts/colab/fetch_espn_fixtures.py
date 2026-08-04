@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,12 @@ def normalize_league(value: str) -> str:
 
 def espn_date(value: str) -> str:
     return datetime.strptime(value, "%Y-%m-%d").strftime("%Y%m%d")
+
+
+def slug(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
 
 
 def fetch_scoreboard(league: str, start_date: str, end_date: str, limit: int) -> dict[str, Any]:
@@ -127,8 +134,33 @@ def first_fixture_weeks(df: pd.DataFrame, weeks: int) -> pd.DataFrame:
         return df
     out = df.copy()
     out["week_start"] = (out["kickoff_utc"] - pd.to_timedelta(out["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
+    out["matchup_number"] = range(1, len(out) + 1)
+    out["matchup_key"] = [
+        f"{number}_{slug(home)}_{slug(away)}"
+        for number, home, away in zip(out["matchup_number"], out["home_team_name"], out["away_team_name"])
+    ]
     keep_weeks = out["week_start"].drop_duplicates().head(weeks).tolist()
     return out[out["week_start"].isin(keep_weeks)].copy()
+
+
+def display_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "week_start",
+        "matchup_number",
+        "matchup_key",
+        "kickoff_utc",
+        "competition_id",
+        "season",
+        "espn_event_id",
+        "home_team_id",
+        "home_team_name",
+        "away_team_id",
+        "away_team_name",
+        "venue_name",
+        "venue_city",
+        "status",
+    ]
+    return df[[column for column in columns if column in df.columns]].copy()
 
 
 def main() -> int:
@@ -148,7 +180,7 @@ def main() -> int:
     fixtures_path = output_dir / f"{league}_fixtures.csv"
     first_weeks_path = output_dir / f"{league}_first_{args.weeks}_weeks_fixtures.csv"
     fixtures.to_csv(fixtures_path, index=False)
-    first_weeks.to_csv(first_weeks_path, index=False)
+    display_fixture_columns(first_weeks).to_csv(first_weeks_path, index=False)
 
     summary = {
         "league": league,
