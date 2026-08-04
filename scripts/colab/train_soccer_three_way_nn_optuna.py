@@ -117,6 +117,26 @@ def s3_storage_options() -> dict[str, Any] | None:
     }
 
 
+def s3_filesystem():
+    storage_options = s3_storage_options()
+    if storage_options is None:
+        raise SystemExit(
+            "DigitalOcean Spaces credentials are missing. In Colab set:\n"
+            '  os.environ["DO_SPACES_KEY"] = "your_access_key"\n'
+            '  os.environ["DO_SPACES_SECRET"] = "your_secret_key"\n'
+            'Optional endpoint defaults to https://fra1.digitaloceanspaces.com.'
+        )
+    try:
+        import s3fs
+    except ModuleNotFoundError as exc:
+        raise SystemExit("s3fs is missing. In Colab run: !pip install -r requirements-colab.txt") from exc
+    return s3fs.S3FileSystem(**storage_options)
+
+
+def s3_key(path: str) -> str:
+    return path.removeprefix("s3://")
+
+
 def partition_paths(root: str, competitions: list[str], seasons: list[str]) -> list[str]:
     if not competitions or not seasons:
         return [root]
@@ -124,12 +144,15 @@ def partition_paths(root: str, competitions: list[str], seasons: list[str]) -> l
 
 
 def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) -> pd.DataFrame:
-    storage_options = s3_storage_options() if root.startswith("s3://") else None
+    filesystem = s3_filesystem() if root.startswith("s3://") else None
     paths = partition_paths(root, competitions, seasons)
+    if filesystem is not None and not competitions and not seasons and not root.endswith(".parquet"):
+        parquet_keys = sorted(filesystem.glob(f"{s3_key(root).rstrip('/')}/**/*.parquet"))
+        paths = [f"s3://{path}" for path in parquet_keys]
     frames: list[pd.DataFrame] = []
     for path in paths:
         try:
-            frames.append(pd.read_parquet(path, storage_options=storage_options))
+            frames.append(pd.read_parquet(path, filesystem=filesystem))
         except FileNotFoundError:
             print(f"missing partition: {path}")
     if not frames:
