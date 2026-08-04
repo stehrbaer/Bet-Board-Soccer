@@ -126,12 +126,24 @@ python scripts/colab/export_first_weeks_predictions.py \
   --weeks 5
 ```
 
+If `test_predictions.parquet` was created before team names were included, enrich it from the gold input:
+
+```bash
+python scripts/colab/export_first_weeks_predictions.py \
+  --predictions outputs/eng1_soccer_nn/test_predictions.parquet \
+  --gold-input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input/competition=eng.1/season=2025/part-000.parquet \
+  --output-dir outputs/eng1_soccer_nn \
+  --weeks 5
+```
+
 This writes:
 
 ```text
 first_5_weeks_predictions.csv
 first_5_weeks_summary.json
 ```
+
+The CSV includes `home_team_name`, `away_team_name`, and `matchup_key`.
 
 ## Future Fixtures
 

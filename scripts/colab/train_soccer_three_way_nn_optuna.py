@@ -584,9 +584,18 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
         metrics["accuracy"],
         metrics["multiclass_brier"],
     )
-    prediction_frame = test_df[
-        ["match_id", "competition_id", "season", "kickoff_utc", "home_team_id", "away_team_id", "result_target"]
-    ].copy()
+    prediction_columns = [
+        "match_id",
+        "competition_id",
+        "season",
+        "kickoff_utc",
+        "home_team_id",
+        "away_team_id",
+        "home_team_name",
+        "away_team_name",
+        "result_target",
+    ]
+    prediction_frame = test_df[[column for column in prediction_columns if column in test_df.columns]].copy()
     prediction_frame["prob_home"] = probs[:, 0]
     prediction_frame["prob_draw"] = probs[:, 1]
     prediction_frame["prob_away"] = probs[:, 2]
