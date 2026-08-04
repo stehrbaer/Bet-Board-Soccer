@@ -156,6 +156,7 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
     if filesystem is not None and not competitions and not seasons and not root.endswith(".parquet"):
         parquet_keys = sorted(filesystem.glob(f"{s3_key(root).rstrip('/')}/**/*.parquet"))
         paths = [f"s3://{path}" for path in parquet_keys]
+    print(json.dumps({"loading_parquet_files": len(paths), "input": root, "competitions": competitions, "seasons": seasons}))
     frames: list[pd.DataFrame] = []
     for path in paths:
         try:
@@ -327,6 +328,9 @@ def main() -> int:
         args.n_folds = min(args.n_folds, 2)
         args.val_size = min(args.val_size, 80)
         args.min_train_size = min(args.min_train_size, 160)
+        if not args.competitions and not args.seasons:
+            args.competitions = "eng_1"
+            args.seasons = "2021,2022,2023,2024,2025"
 
     competitions = csv_list(args.competitions)
     seasons = csv_list(args.seasons)
