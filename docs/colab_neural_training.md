@@ -114,3 +114,21 @@ Upload these artifacts back to DigitalOcean after the run under:
 ```text
 s3://betboard-ml-artifacts/soccer-prediction-data/models/neural_three_way/run_id=<run_id>/
 ```
+
+## First Weeks Export
+
+After a league run finishes, export the first five weeks of predictions:
+
+```bash
+python scripts/colab/export_first_weeks_predictions.py \
+  --predictions outputs/eng1_soccer_nn/test_predictions.parquet \
+  --output-dir outputs/eng1_soccer_nn \
+  --weeks 5
+```
+
+This writes:
+
+```text
+first_5_weeks_predictions.csv
+first_5_weeks_summary.json
+```
