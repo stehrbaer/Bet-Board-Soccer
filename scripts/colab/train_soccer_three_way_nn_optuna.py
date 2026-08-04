@@ -39,19 +39,25 @@ from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
 LOGGER = logging.getLogger("soccer_nn")
 
 LEAGUE_ALIASES = {
-    "eng1": "eng_1",
-    "epl": "eng_1",
-    "premierleague": "eng_1",
-    "eng2": "eng_2",
-    "championship": "eng_2",
-    "esp1": "esp_1",
-    "laliga": "esp_1",
-    "ger1": "ger_1",
-    "bundesliga": "ger_1",
-    "ita1": "ita_1",
-    "seriea": "ita_1",
-    "fra1": "fra_1",
-    "ligue1": "fra_1",
+    "eng1": "eng.1",
+    "eng_1": "eng.1",
+    "epl": "eng.1",
+    "premierleague": "eng.1",
+    "eng2": "eng.2",
+    "eng_2": "eng.2",
+    "championship": "eng.2",
+    "esp1": "esp.1",
+    "esp_1": "esp.1",
+    "laliga": "esp.1",
+    "ger1": "ger.1",
+    "ger_1": "ger.1",
+    "bundesliga": "ger.1",
+    "ita1": "ita.1",
+    "ita_1": "ita.1",
+    "seriea": "ita.1",
+    "fra1": "fra.1",
+    "fra_1": "fra.1",
+    "ligue1": "fra.1",
 }
 
 
@@ -146,7 +152,12 @@ def normalize_league(value: str) -> str:
 def resolve_competitions(args: argparse.Namespace) -> list[str]:
     competitions = csv_list(args.competitions)
     if competitions:
-        return [normalize_league(comp) for comp in competitions]
+        resolved = [normalize_league(comp) for comp in competitions]
+        if resolved == ["all"]:
+            return []
+        if "all" in resolved:
+            raise SystemExit("--competitions all cannot be combined with specific competitions.")
+        return resolved
     leagues = [normalize_league(league) for league in csv_list(args.league)]
     if not leagues or leagues == ["all"]:
         return []
@@ -241,7 +252,12 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
             LOGGER.warning("missing partition: %s", path)
     if not frames:
         raise RuntimeError("No input rows loaded.")
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        raise RuntimeError("Only empty input parquet files were loaded.")
+    LOGGER.info("concatenating dataframes count=%s", len(frames))
     df = pd.concat(frames, ignore_index=True)
+    LOGGER.info("concat complete rows=%s columns=%s", len(df), len(df.columns))
     df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
     df["season"] = df["season"].astype(str)
     df = df.dropna(subset=["kickoff_utc", "result_target"]).copy()
