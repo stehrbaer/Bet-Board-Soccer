@@ -143,6 +143,13 @@ def partition_paths(root: str, competitions: list[str], seasons: list[str]) -> l
     return [f"{root.rstrip('/')}/competition={comp}/season={season}/part-000.parquet" for comp in competitions for season in seasons]
 
 
+def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
+    if filesystem is None:
+        return pd.read_parquet(path)
+    with filesystem.open(s3_key(path), "rb") as handle:
+        return pd.read_parquet(handle)
+
+
 def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) -> pd.DataFrame:
     filesystem = s3_filesystem() if root.startswith("s3://") else None
     paths = partition_paths(root, competitions, seasons)
@@ -152,7 +159,7 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
     frames: list[pd.DataFrame] = []
     for path in paths:
         try:
-            frames.append(pd.read_parquet(path, filesystem=filesystem))
+            frames.append(read_parquet_path(path, filesystem))
         except FileNotFoundError:
             print(f"missing partition: {path}")
     if not frames:
