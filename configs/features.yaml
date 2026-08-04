@@ -1,0 +1,25 @@
+schema_version: soccer_gold_v0.1
+target_mapping:
+  home_win: 0
+  draw: 1
+  away_win: 2
+required_identifier_columns:
+  - match_id
+  - competition_id
+  - season
+  - kickoff_utc
+  - home_team_id
+  - away_team_id
+required_target_columns:
+  - home_goals
+  - away_goals
+  - result_target
+metadata_columns:
+  - feature_cutoff_utc
+  - feature_build_timestamp
+  - feature_schema_version
+  - team_data_completeness
+  - player_data_completeness
+  - lineup_data_status
+  - weather_data_status
+

@@ -1,0 +1,27 @@
+features:
+  elo_difference:
+    label: Elo difference
+    group: team_strength
+    concept: relative_team_quality
+    direction:
+      positive:
+        supports: home_win
+      negative:
+        supports: away_win
+  rest_difference:
+    label: Rest-day difference
+    group: fatigue
+    concept: recovery_advantage
+    direction:
+      positive:
+        supports: home_win
+      negative:
+        supports: away_win
+  draw_market_probability:
+    label: Draw market probability
+    group: betting_market
+    concept: market_equilibrium
+    direction:
+      positive:
+        supports: draw
+

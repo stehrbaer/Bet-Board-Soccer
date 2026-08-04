@@ -1,0 +1,12 @@
+spaces:
+  bucket_env: DO_SPACES_BUCKET
+  endpoint_env: DO_SPACES_ENDPOINT
+  region_env: DO_SPACES_REGION
+  key_env: DO_SPACES_KEY
+  secret_env: DO_SPACES_SECRET
+  root_prefix_env: DO_SPACES_ROOT_PREFIX
+  default_bucket: betboard-ml-artifacts
+  default_endpoint: https://fra1.digitaloceanspaces.com
+  default_region: fra1
+  default_root_prefix: soccer-prediction-data
+

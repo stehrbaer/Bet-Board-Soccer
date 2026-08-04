@@ -1,0 +1,31 @@
+sources:
+  football_data_uk:
+    enabled: true
+    purpose:
+      - historical_results
+      - historical_odds
+  football_data_org:
+    enabled: false
+    api_key_env: FOOTBALL_DATA_ORG_API_KEY
+    purpose:
+      - fixtures
+      - teams
+      - standings
+  open_meteo:
+    enabled: false
+    purpose:
+      - historical_weather
+      - forecast_weather
+  api_football:
+    enabled: false
+    api_key_env: API_FOOTBALL_API_KEY
+    purpose:
+      - lineups
+      - injuries
+      - player_stats
+  odds_api:
+    enabled: false
+    api_key_env: ODDS_API_KEY
+    purpose:
+      - upcoming_odds
+

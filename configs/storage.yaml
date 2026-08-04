@@ -1,0 +1,11 @@
+root_prefix: soccer-prediction-data
+zones:
+  raw: raw
+  bronze: bronze
+  silver: silver
+  gold: gold
+  manifests: manifests
+  knowledge_graph: knowledge_graph
+legacy_sources:
+  historical_training: soccer/training_data/historical
+

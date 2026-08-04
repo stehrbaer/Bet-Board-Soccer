@@ -1,0 +1,26 @@
+competitions:
+  - id: eng.1
+    slug: eng_1
+    name: English Premier League
+    priority: core
+  - id: eng.2
+    slug: eng_2
+    name: English Championship
+    priority: core
+  - id: esp.1
+    slug: esp_1
+    name: Spanish LALIGA
+    priority: core
+  - id: ger.1
+    slug: ger_1
+    name: German Bundesliga
+    priority: core
+  - id: ita.1
+    slug: ita_1
+    name: Italian Serie A
+    priority: core
+  - id: fra.1
+    slug: fra_1
+    name: French Ligue 1
+    priority: core
+
