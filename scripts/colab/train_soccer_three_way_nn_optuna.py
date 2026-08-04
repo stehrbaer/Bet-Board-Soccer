@@ -237,7 +237,7 @@ def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
         return pd.read_parquet(handle)
 
 
-def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) -> pd.DataFrame:
+def load_gold_dataset(root: str, competitions: list[str], seasons: list[str], output_dir: Path | None = None) -> pd.DataFrame:
     filesystem = s3_filesystem() if root.startswith("s3://") else None
     paths = partition_paths(root, competitions, seasons)
     if filesystem is not None and not competitions and not root.endswith(".parquet"):
@@ -256,12 +256,37 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
         competitions or ["all"],
         seasons or ["all"],
     )
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "reading_parquet",
+                "parquet_files": len(paths),
+                "input": root,
+                "competitions": competitions or ["all"],
+                "seasons": seasons or ["all"],
+            },
+        )
     frames: list[pd.DataFrame] = []
     started = time.monotonic()
     for idx, path in enumerate(paths, start=1):
         try:
             LOGGER.info("reading parquet %s/%s %s", idx, len(paths), path)
-            frames.append(read_parquet_path(path, filesystem))
+            frame = read_parquet_path(path, filesystem)
+            if not frame.empty:
+                frame = frame.dropna(axis=1, how="all")
+            frames.append(frame)
+            if output_dir is not None and (idx == len(paths) or idx % 10 == 0):
+                write_json(
+                    output_dir / "load_status.json",
+                    {
+                        "stage": "reading_parquet",
+                        "parquet_files": len(paths),
+                        "files_read": idx,
+                        "non_empty_frames": len([item for item in frames if not item.empty]),
+                        "elapsed_seconds": round(time.monotonic() - started, 1),
+                    },
+                )
         except FileNotFoundError:
             LOGGER.warning("missing partition: %s", path)
     if not frames:
@@ -270,15 +295,47 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str]) ->
     if not frames:
         raise RuntimeError("Only empty input parquet files were loaded.")
     LOGGER.info("concatenating dataframes count=%s", len(frames))
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "concatenating",
+                "dataframes": len(frames),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
     df = pd.concat(frames, ignore_index=True)
     LOGGER.info("concat complete rows=%s columns=%s", len(df), len(df.columns))
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "concat_complete",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    LOGGER.info("cleaning loaded dataframe")
     df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
     df["season"] = df["season"].astype(str)
     df = df.dropna(subset=["kickoff_utc", "result_target"]).copy()
     df["result_target"] = pd.to_numeric(df["result_target"], errors="coerce").astype("Int64")
     df = df[df["result_target"].isin([0, 1, 2])].copy()
+    LOGGER.info("sorting loaded dataframe")
+    df = df.sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
     LOGGER.info("loaded rows=%s elapsed_seconds=%.1f", len(df), time.monotonic() - started)
-    return df.sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "loaded",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    return df
 
 
 def require_tensorflow():
@@ -558,15 +615,38 @@ def main() -> int:
     tf_pack[0].random.set_seed(args.seed)
     np.random.seed(args.seed)
 
-    df = load_gold_dataset(args.input, competitions, seasons)
+    df = load_gold_dataset(args.input, competitions, seasons, output_dir)
+    write_json(output_dir / "load_complete.json", {"rows": len(df), "columns": len(df.columns)})
+    LOGGER.info("building train/test split")
     train_all = df[df["season"].astype(str) <= str(args.train_through_season)].copy()
     test = df[df["season"].astype(str) == str(args.test_season)].copy()
     if train_all.empty or test.empty:
         raise RuntimeError(f"Bad train/test split: train_rows={len(train_all)} test_rows={len(test)}")
+    write_json(
+        output_dir / "split_profile.json",
+        {
+            "train_rows": len(train_all),
+            "test_rows": len(test),
+            "train_through_season": args.train_through_season,
+            "test_season": args.test_season,
+        },
+    )
 
+    LOGGER.info("selecting numeric feature columns max_features=%s total_columns=%s", args.max_features, len(train_all.columns))
+    feature_started = time.monotonic()
     feature_cols = choose_numeric_feature_columns(train_all, args.max_features)
+    LOGGER.info("feature selection complete features=%s elapsed_seconds=%.1f", len(feature_cols), time.monotonic() - feature_started)
     if not feature_cols:
         raise RuntimeError("No numeric feature columns selected.")
+    write_json(
+        output_dir / "feature_selection_status.json",
+        {
+            "selected_features": len(feature_cols),
+            "max_features": args.max_features,
+            "elapsed_seconds": round(time.monotonic() - feature_started, 1),
+        },
+    )
+    LOGGER.info("building walk-forward folds")
     folds = make_walkforward_folds(train_all, args.n_folds, args.val_size, args.min_train_size)
     LOGGER.info("selected features=%s folds=%s", len(feature_cols), len(folds))
     print(json.dumps({"rows": len(df), "train_rows": len(train_all), "test_rows": len(test), "features": len(feature_cols)}, indent=2))

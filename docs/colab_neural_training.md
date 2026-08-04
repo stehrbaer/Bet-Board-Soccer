@@ -90,6 +90,10 @@ The script writes these files early, before the model is complete:
 ```text
 run_config.json
 training.log
+load_status.json
+load_complete.json
+split_profile.json
+feature_selection_status.json
 dataset_profile.json
 feature_columns.json
 optuna_trials.csv
