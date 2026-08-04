@@ -101,7 +101,11 @@ def make_walkforward_folds(
 
 def prepare_fold(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: list[str]) -> PreparedFold:
     x_train_raw = train_df[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    x_val_raw = val_df[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    usable_cols = x_train_raw.columns[x_train_raw.notna().any(axis=0)].tolist()
+    if not usable_cols:
+        raise ValueError("No feature columns have observed values in the training fold.")
+    x_train_raw = x_train_raw[usable_cols]
+    x_val_raw = val_df[usable_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     imputer = SimpleImputer(strategy="median")
     scaler = StandardScaler()
     x_train = scaler.fit_transform(imputer.fit_transform(x_train_raw))
@@ -113,8 +117,7 @@ def prepare_fold(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: lis
         y_train=y_train,
         x_val=np.nan_to_num(x_val, nan=0.0, posinf=0.0, neginf=0.0),
         y_val=y_val,
-        feature_names=feature_cols,
+        feature_names=usable_cols,
         imputer=imputer,
         scaler=scaler,
     )
-

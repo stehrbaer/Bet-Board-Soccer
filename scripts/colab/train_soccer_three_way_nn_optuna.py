@@ -724,9 +724,10 @@ def main() -> int:
     summary_path = output_dir / "summary.json"
 
     model.save(model_path)
-    joblib.dump({"imputer": fold.imputer, "scaler": fold.scaler, "feature_names": feature_cols}, preprocessing_path)
+    joblib.dump({"imputer": fold.imputer, "scaler": fold.scaler, "feature_names": fold.feature_names}, preprocessing_path)
     predictions.to_parquet(predictions_path, index=False)
     study.trials_dataframe().to_csv(trials_path, index=False)
+    features_path.write_text(json.dumps(fold.feature_names, indent=2) + "\n")
     config = TrainingConfig(
         input=args.input,
         output_dir=str(output_dir),
@@ -756,6 +757,8 @@ def main() -> int:
             "trials": str(trials_path),
             "features": str(features_path),
         },
+        "candidate_features": len(feature_cols),
+        "trained_features": len(fold.feature_names),
     }
     summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
     print(json.dumps(summary, indent=2, default=str))

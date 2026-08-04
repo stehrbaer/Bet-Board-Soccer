@@ -6,6 +6,7 @@ from betboard_soccer_extension.modeling.nn_preprocessing import (
     choose_numeric_feature_columns,
     make_walkforward_folds,
     one_hot_target,
+    prepare_fold,
 )
 
 
@@ -38,3 +39,25 @@ def test_make_walkforward_folds() -> None:
     assert len(folds[0][0]) == 8
     assert len(folds[0][1]) == 4
 
+
+def test_prepare_fold_drops_all_missing_training_features() -> None:
+    train_df = pd.DataFrame(
+        {
+            "safe_feature": [1.0, 2.0, 3.0],
+            "missing_in_train": [None, None, None],
+            "result_target": [0, 1, 2],
+        }
+    )
+    val_df = pd.DataFrame(
+        {
+            "safe_feature": [4.0, 5.0],
+            "missing_in_train": [10.0, 11.0],
+            "result_target": [0, 2],
+        }
+    )
+
+    fold = prepare_fold(train_df, val_df, ["safe_feature", "missing_in_train"])
+
+    assert fold.feature_names == ["safe_feature"]
+    assert fold.x_train.shape == (3, 1)
+    assert fold.x_val.shape == (2, 1)
