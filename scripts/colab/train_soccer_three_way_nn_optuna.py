@@ -60,6 +60,16 @@ LEAGUE_ALIASES = {
     "ligue1": "fra.1",
 }
 
+REQUIRED_MODEL_COLUMNS = [
+    "match_id",
+    "competition_id",
+    "season",
+    "kickoff_utc",
+    "home_team_id",
+    "away_team_id",
+    "result_target",
+]
+
 
 try:
     from betboard_soccer_extension.modeling.nn_preprocessing import (
@@ -317,12 +327,45 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str], ou
             },
         )
     LOGGER.info("cleaning loaded dataframe")
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "cleaning",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    missing_required = [column for column in REQUIRED_MODEL_COLUMNS if column not in df.columns]
+    if missing_required:
+        raise RuntimeError(f"Input dataset is missing required columns: {missing_required}")
     df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
     df["season"] = df["season"].astype(str)
-    df = df.dropna(subset=["kickoff_utc", "result_target"]).copy()
     df["result_target"] = pd.to_numeric(df["result_target"], errors="coerce").astype("Int64")
-    df = df[df["result_target"].isin([0, 1, 2])].copy()
-    LOGGER.info("sorting loaded dataframe")
+    valid_rows = df["kickoff_utc"].notna() & df["result_target"].isin([0, 1, 2])
+    numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    keep_columns = list(dict.fromkeys(REQUIRED_MODEL_COLUMNS + numeric_columns))
+    LOGGER.info(
+        "pruning dataframe columns original=%s kept=%s valid_rows=%s",
+        len(df.columns),
+        len(keep_columns),
+        int(valid_rows.sum()),
+    )
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "pruning_columns",
+                "rows": len(df),
+                "valid_rows": int(valid_rows.sum()),
+                "original_columns": len(df.columns),
+                "kept_columns": len(keep_columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    df = df.loc[valid_rows, keep_columns].copy()
+    LOGGER.info("sorting loaded dataframe rows=%s columns=%s", len(df), len(df.columns))
     df = df.sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
     LOGGER.info("loaded rows=%s elapsed_seconds=%.1f", len(df), time.monotonic() - started)
     if output_dir is not None:
