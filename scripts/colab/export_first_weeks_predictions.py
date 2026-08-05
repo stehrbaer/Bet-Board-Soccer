@@ -19,6 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, help="Directory for CSV and JSON outputs.")
     parser.add_argument("--weeks", type=int, default=5, help="Number of calendar weeks to export.")
     parser.add_argument("--gold-input", default="", help="Optional gold parquet file used to add team names by match_id.")
+    parser.add_argument(
+        "--auto-gold-root",
+        default="s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input",
+        help="Gold dataset root used to auto-add team names when --gold-input is omitted.",
+    )
+    parser.add_argument("--allow-id-matchup-key", action="store_true", help="Allow matchup_key to fall back to team IDs.")
     return parser.parse_args()
 
 
@@ -69,19 +75,62 @@ def enrich_team_names(df: pd.DataFrame, gold_input: str) -> pd.DataFrame:
     return df.merge(names, on="match_id", how="left")
 
 
+def gold_partition_path(root: str, competition_id: object, season: object) -> str:
+    return f"{root.rstrip('/')}/competition={competition_id}/season={season}/part-000.parquet"
+
+
+def enrich_team_names_auto(df: pd.DataFrame, gold_root: str) -> tuple[pd.DataFrame, list[str]]:
+    if {"home_team_name", "away_team_name"}.issubset(df.columns) or not gold_root:
+        return df, []
+    required = {"competition_id", "season", "match_id"}
+    if not required.issubset(df.columns):
+        return df, []
+
+    frames = []
+    loaded_paths = []
+    partitions = df[["competition_id", "season"]].drop_duplicates()
+    for row in partitions.itertuples(index=False):
+        path = gold_partition_path(gold_root, row.competition_id, row.season)
+        try:
+            gold = read_parquet(path)
+        except FileNotFoundError:
+            continue
+        name_cols = ["match_id", "home_team_name", "away_team_name"]
+        if set(name_cols).issubset(gold.columns):
+            frames.append(gold[name_cols].drop_duplicates("match_id"))
+            loaded_paths.append(path)
+
+    if not frames:
+        return df, loaded_paths
+    names = pd.concat(frames, ignore_index=True).drop_duplicates("match_id")
+    return df.merge(names, on="match_id", how="left"), loaded_paths
+
+
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = read_parquet(args.predictions)
-    df = enrich_team_names(df, args.gold_input)
+    loaded_gold_paths: list[str] = []
+    if args.gold_input:
+        df = enrich_team_names(df, args.gold_input)
+        loaded_gold_paths = [args.gold_input]
+    else:
+        df, loaded_gold_paths = enrich_team_names_auto(df, args.auto_gold_root)
     if df.empty:
         raise RuntimeError("Prediction file has no rows.")
     df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
     df = df.dropna(subset=["kickoff_utc"]).sort_values(["kickoff_utc", "match_id"]).copy()
     df["prediction"] = df.apply(ranked_label, axis=1)
     df["week_start"] = (df["kickoff_utc"] - pd.to_timedelta(df["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
+    has_team_names = {"home_team_name", "away_team_name"}.issubset(df.columns)
+    if not has_team_names and not args.allow_id_matchup_key:
+        raise RuntimeError(
+            "Team names are missing, so matchup_key would use IDs. "
+            "Pass --gold-input for the matching season, keep DO_SPACES env vars set for auto-enrichment, "
+            "or pass --allow-id-matchup-key to permit ID fallback."
+        )
     home_names = df["home_team_name"] if "home_team_name" in df.columns else df["home_team_id"]
     away_names = df["away_team_name"] if "away_team_name" in df.columns else df["away_team_id"]
     df["matchup_key"] = [
@@ -116,6 +165,8 @@ def main() -> int:
     out.to_csv(csv_path, index=False)
     summary = {
         "source_predictions": args.predictions,
+        "team_name_sources": loaded_gold_paths,
+        "has_team_names": {"home_team_name", "away_team_name"}.issubset(out.columns),
         "weeks": first_weeks,
         "rows": len(out),
         "output_csv": str(csv_path),

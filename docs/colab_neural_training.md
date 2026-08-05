@@ -126,7 +126,7 @@ python scripts/colab/export_first_weeks_predictions.py \
   --weeks 5
 ```
 
-If `test_predictions.parquet` was created before team names were included, enrich it from the gold input:
+The exporter auto-enriches team names from the matching gold partition when DigitalOcean credentials are set. If `test_predictions.parquet` was created before team names were included, you can also pass the gold input explicitly:
 
 ```bash
 python scripts/colab/export_first_weeks_predictions.py \
