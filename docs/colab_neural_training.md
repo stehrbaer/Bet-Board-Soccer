@@ -217,3 +217,27 @@ draw_gap
 home_away_gap
 draw_policy_version
 ```
+
+## Explanation Graph
+
+Build a matchup-filterable graph for future predictions:
+
+```bash
+python scripts/colab/build_prediction_explanation_graph.py \
+  --predictions outputs/eng1_soccer_nn/future_2026/future_predictions.csv \
+  --model-input outputs/eng1_soccer_nn/future_2026/future_model_input.parquet \
+  --model outputs/eng1_soccer_nn/soccer_three_way_nn.keras \
+  --preprocessing outputs/eng1_soccer_nn/preprocessing.joblib \
+  --draw-policy configs/draw_policy_eng1.json \
+  --output-dir outputs/eng1_soccer_nn/future_2026/explanations
+```
+
+This writes:
+
+```text
+prediction_explanation_graph.html
+prediction_explanation_graph.json
+feature_contributions.csv
+```
+
+Open `prediction_explanation_graph.html` in Colab or download it. The page has a matchup dropdown so each graph can be filtered by fixture.
