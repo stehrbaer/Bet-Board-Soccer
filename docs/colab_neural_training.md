@@ -5,7 +5,7 @@ Use this when running the full neural 1X2 model outside the local MacBook.
 ## Colab Setup
 
 ```python
-!pip install pandas pyarrow s3fs scikit-learn tensorflow optuna joblib
+!pip install pandas pyarrow duckdb s3fs scikit-learn tensorflow optuna joblib
 ```
 
 Set DigitalOcean credentials in Colab secrets or environment variables:
@@ -151,10 +151,13 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --epochs 50 \
   --n-trials 25 \
   --next-games 5 \
+  --duckdb-preprocess \
   --output-dir outputs/soccer_nn_global
 ```
 
 With `--league all` and no explicit `--competitions`, the global run now targets full-scope regular domestic leagues only and defaults seasons to `2021` through `--test-season`. This avoids accidentally loading every lake partition, including cups, friendlies, UEFA competitions, partial 2026 partitions, and older one-off seasons.
+
+`--duckdb-preprocess` is recommended for global runs. DuckDB scans the parquet files, filters competition/season partitions, casts unstable columns, and returns only required plus numeric model columns to pandas. This reduces Colab memory pressure before feature selection and TensorFlow training.
 
 ## Artifacts
 

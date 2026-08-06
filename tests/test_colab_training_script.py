@@ -103,3 +103,36 @@ def test_export_next_games_predictions_writes_compact_csv(tmp_path: Path) -> Non
         "1_arsenal_coventry_city",
         "2_hull_city_manchester_united",
     ]
+
+
+def test_duckdb_loader_filters_partitions_and_keeps_numeric_columns(tmp_path: Path) -> None:
+    module = load_script_module()
+    root = tmp_path / "gold"
+    rows = [
+        ("eng.1", "2024", 1, 0, 1.5),
+        ("eng.1", "2025", 2, 1, 2.5),
+        ("ger.1", "2025", 3, 2, 3.5),
+        ("club.friendly", "2025", 4, 0, 4.5),
+    ]
+    for competition, season, match_id, target, feature in rows:
+        partition = root / f"competition={competition}" / f"season={season}"
+        partition.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "match_id": [match_id],
+                "competition_id": [competition],
+                "season": [season],
+                "kickoff_utc": [f"{season}-08-01T12:00:00Z"],
+                "home_team_id": [100 + match_id],
+                "away_team_id": [200 + match_id],
+                "result_target": [target],
+                "model_feature": [feature],
+                "text_blob": ["drop me"],
+            }
+        ).to_parquet(partition / "part-000.parquet", index=False)
+
+    df = module.load_gold_dataset_duckdb(str(root), ["eng.1", "ger.1"], ["2025"])
+
+    assert df["match_id"].tolist() == [2, 3]
+    assert "model_feature" in df.columns
+    assert "text_blob" not in df.columns

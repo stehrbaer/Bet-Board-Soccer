@@ -191,6 +191,11 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Write the first N held-out test predictions by kickoff time for each training run. Use 0 to disable.",
     )
+    parser.add_argument(
+        "--duckdb-preprocess",
+        action="store_true",
+        help="Use DuckDB to scan/filter parquet before loading into pandas. Recommended for global models.",
+    )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
 
@@ -296,6 +301,72 @@ def s3_key(path: str) -> str:
     return path.removeprefix("s3://")
 
 
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def sql_list(values: list[str]) -> str:
+    return ", ".join(sql_literal(value) for value in values)
+
+
+def sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def configure_duckdb_s3(con) -> None:
+    key = os.getenv("DO_SPACES_KEY")
+    secret = os.getenv("DO_SPACES_SECRET")
+    if not key or not secret:
+        raise SystemExit(
+            "DigitalOcean Spaces credentials are missing. In Colab set DO_SPACES_KEY and DO_SPACES_SECRET "
+            "before using --duckdb-preprocess against s3:// input."
+        )
+    endpoint = os.getenv("DO_SPACES_ENDPOINT", "https://fra1.digitaloceanspaces.com")
+    endpoint = endpoint.removeprefix("https://").removeprefix("http://")
+    region = os.getenv("DO_SPACES_REGION", "fra1")
+    con.execute("INSTALL httpfs")
+    con.execute("LOAD httpfs")
+    con.execute(f"SET s3_access_key_id={sql_literal(key)}")
+    con.execute(f"SET s3_secret_access_key={sql_literal(secret)}")
+    con.execute(f"SET s3_endpoint={sql_literal(endpoint)}")
+    con.execute(f"SET s3_region={sql_literal(region)}")
+    con.execute("SET s3_url_style='path'")
+    con.execute("SET s3_use_ssl=true")
+
+
+def duckdb_type_is_numeric(type_name: str) -> bool:
+    normalized = type_name.upper()
+    return any(
+        token in normalized
+        for token in [
+            "TINYINT",
+            "SMALLINT",
+            "INTEGER",
+            "BIGINT",
+            "HUGEINT",
+            "UTINYINT",
+            "USMALLINT",
+            "UINTEGER",
+            "UBIGINT",
+            "FLOAT",
+            "DOUBLE",
+            "DECIMAL",
+            "REAL",
+        ]
+    )
+
+
+def duckdb_read_expr(paths: list[str]) -> str:
+    path_list = "[" + sql_list(paths) + "]"
+    return f"read_parquet({path_list}, union_by_name=true, hive_partitioning=false)"
+
+
+def duckdb_schema(con, paths: list[str]) -> list[tuple[str, str]]:
+    query = f"DESCRIBE SELECT * FROM {duckdb_read_expr(paths)}"
+    rows = con.execute(query).fetchall()
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
 def partition_paths(root: str, competitions: list[str], seasons: list[str]) -> list[str]:
     if not competitions or not seasons:
         return [root]
@@ -377,6 +448,123 @@ def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
         return pd.read_parquet(path)
     with filesystem.open(s3_key(path), "rb") as handle:
         return pd.read_parquet(handle)
+
+
+def load_gold_dataset_duckdb(root: str, competitions: list[str], seasons: list[str], output_dir: Path | None = None) -> pd.DataFrame:
+    try:
+        import duckdb
+    except ModuleNotFoundError as exc:
+        raise SystemExit("duckdb is missing. In Colab run: !pip install -r requirements-colab.txt") from exc
+
+    filesystem = s3_filesystem() if root.startswith("s3://") else None
+    paths = partition_paths(root, competitions, seasons)
+    if filesystem is not None and (not competitions or not seasons) and not root.endswith(".parquet"):
+        root_key = s3_key(root).rstrip("/")
+        parquet_keys = sorted(filesystem.glob(f"{root_key}/**/*.parquet"))
+        paths = [f"s3://{path}" for path in parquet_keys]
+    if not paths:
+        raise RuntimeError("No parquet paths selected for DuckDB preprocessing.")
+
+    con = duckdb.connect(database=":memory:")
+    if root.startswith("s3://"):
+        configure_duckdb_s3(con)
+
+    started = time.monotonic()
+    LOGGER.info(
+        "duckdb preprocessing started parquet_files=%s input=%s competitions=%s seasons=%s",
+        len(paths),
+        root,
+        competitions or ["all"],
+        seasons or ["all"],
+    )
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "duckdb_schema",
+                "parquet_files": len(paths),
+                "input": root,
+                "competitions": competitions or ["all"],
+                "seasons": seasons or ["all"],
+            },
+        )
+
+    schema = duckdb_schema(con, paths)
+    schema_map = {name: type_name for name, type_name in schema}
+    missing_required = [column for column in REQUIRED_MODEL_COLUMNS if column not in schema_map]
+    if missing_required:
+        raise RuntimeError(f"Input dataset is missing required columns: {missing_required}")
+
+    numeric_columns = [
+        name
+        for name, type_name in schema
+        if duckdb_type_is_numeric(type_name) and name not in REQUIRED_MODEL_COLUMNS
+    ]
+    keep_columns = list(dict.fromkeys(REQUIRED_MODEL_COLUMNS + numeric_columns))
+    select_exprs = []
+    for column in keep_columns:
+        ident = sql_identifier(column)
+        if column == "season":
+            select_exprs.append(f"CAST({ident} AS VARCHAR) AS {ident}")
+        elif column == "result_target":
+            select_exprs.append(f"TRY_CAST({ident} AS INTEGER) AS {ident}")
+        elif column == "kickoff_utc":
+            select_exprs.append(f"TRY_CAST({ident} AS TIMESTAMPTZ) AS {ident}")
+        else:
+            select_exprs.append(ident)
+
+    predicates = [
+        "kickoff_utc IS NOT NULL",
+        "TRY_CAST(result_target AS INTEGER) IN (0, 1, 2)",
+    ]
+    if competitions:
+        predicates.append(f"CAST(competition_id AS VARCHAR) IN ({sql_list(competitions)})")
+    if seasons:
+        predicates.append(f"CAST(season AS VARCHAR) IN ({sql_list(seasons)})")
+
+    query = f"""
+        SELECT {", ".join(select_exprs)}
+        FROM {duckdb_read_expr(paths)}
+        WHERE {" AND ".join(predicates)}
+        ORDER BY kickoff_utc, match_id
+    """
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "duckdb_query",
+                "parquet_files": len(paths),
+                "schema_columns": len(schema),
+                "kept_columns": len(keep_columns),
+                "numeric_columns": len(numeric_columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    df = con.execute(query).fetchdf()
+    con.close()
+    LOGGER.info(
+        "duckdb preprocessing complete rows=%s columns=%s elapsed_seconds=%.1f",
+        len(df),
+        len(df.columns),
+        time.monotonic() - started,
+    )
+    if output_dir is not None:
+        write_json(
+            output_dir / "load_status.json",
+            {
+                "stage": "loaded",
+                "engine": "duckdb",
+                "rows": len(df),
+                "columns": len(df.columns),
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            },
+        )
+    if df.empty:
+        raise RuntimeError("DuckDB preprocessing returned no input rows.")
+    df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
+    df["season"] = df["season"].astype(str)
+    df["result_target"] = pd.to_numeric(df["result_target"], errors="coerce").astype("Int64")
+    return df.reset_index(drop=True)
 
 
 def load_gold_dataset(root: str, competitions: list[str], seasons: list[str], output_dir: Path | None = None) -> pd.DataFrame:
@@ -872,6 +1060,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "seed": args.seed,
             "smoke": args.smoke,
             "next_games": args.next_games,
+            "duckdb_preprocess": args.duckdb_preprocess,
             "log_file": str(log_path),
         },
     )
@@ -879,7 +1068,12 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     tf_pack[0].random.set_seed(args.seed)
     np.random.seed(args.seed)
 
-    df = load_gold_dataset(args.input, competitions, seasons, output_dir)
+    load_engine = "duckdb" if args.duckdb_preprocess else "pandas"
+    df = (
+        load_gold_dataset_duckdb(args.input, competitions, seasons, output_dir)
+        if args.duckdb_preprocess
+        else load_gold_dataset(args.input, competitions, seasons, output_dir)
+    )
     write_json(output_dir / "load_complete.json", {"rows": len(df), "columns": len(df.columns)})
     LOGGER.info("building train/test split")
     train_all = df[df["season"].astype(str) <= str(args.train_through_season)].copy()
@@ -968,6 +1162,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     )
     summary = {
         "config": asdict(config),
+        "load_engine": load_engine,
         "best_value": study.best_value,
         "best_params": study.best_params,
         "best_trial_attrs": study.best_trial.user_attrs,

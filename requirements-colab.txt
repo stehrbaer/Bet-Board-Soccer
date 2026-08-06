@@ -1,5 +1,6 @@
 pandas>=2.2
 pyarrow>=16
+duckdb>=1.0
 s3fs>=2024.6
 scikit-learn>=1.5
 tensorflow>=2.17
