@@ -149,6 +149,13 @@ def build_future_feature_frame(fixtures: pd.DataFrame, feature_names: list[str],
     fixtures = fixtures.copy()
     fixtures["kickoff_utc"] = pd.to_datetime(fixtures["kickoff_utc"], errors="coerce", utc=True)
     fixtures = fixtures.dropna(subset=["kickoff_utc"]).sort_values("kickoff_utc").reset_index(drop=True)
+    if "week_start" not in fixtures.columns:
+        fixtures["week_start"] = (fixtures["kickoff_utc"] - pd.to_timedelta(fixtures["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
+    if "matchweek" not in fixtures.columns:
+        week_numbers = {week: idx for idx, week in enumerate(fixtures["week_start"].drop_duplicates(), start=1)}
+        fixtures["matchweek"] = fixtures["week_start"].map(week_numbers)
+    if "matchup_number" not in fixtures.columns:
+        fixtures["matchup_number"] = fixtures.groupby("week_start").cumcount() + 1
 
     for idx, fixture in fixtures.iterrows():
         row: dict[str, Any] = {feature: np.nan for feature in feature_names}
@@ -166,6 +173,9 @@ def build_future_feature_frame(fixtures: pd.DataFrame, feature_names: list[str],
         row.update(
             {
                 "match_id": fixture.get("espn_event_id") or fixture.get("match_id"),
+                "week_start": fixture.get("week_start"),
+                "matchweek": fixture.get("matchweek"),
+                "matchup_number": fixture.get("matchup_number"),
                 "competition_id": fixture.get("competition_id"),
                 "season": fixture.get("season"),
                 "kickoff_utc": fixture.get("kickoff_utc"),
@@ -173,7 +183,7 @@ def build_future_feature_frame(fixtures: pd.DataFrame, feature_names: list[str],
                 "away_team_id": away_id,
                 "home_team_name": fixture.get("home_team_name"),
                 "away_team_name": fixture.get("away_team_name"),
-                "matchup_key": f"{idx + 1}_{slug(fixture.get('home_team_name'))}_{slug(fixture.get('away_team_name'))}",
+                "matchup_key": f"{fixture.get('matchweek')}_{slug(fixture.get('home_team_name'))}_{slug(fixture.get('away_team_name'))}",
             }
         )
         rows.append(row)
@@ -213,6 +223,9 @@ def score_future_rows(model_path: str, preprocessing_path: str, future_df: pd.Da
     out = future_df[
         [
             "matchup_key",
+            "week_start",
+            "matchweek",
+            "matchup_number",
             "kickoff_utc",
             "competition_id",
             "season",

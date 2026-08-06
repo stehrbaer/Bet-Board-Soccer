@@ -124,6 +124,9 @@ def main() -> int:
     df = df.dropna(subset=["kickoff_utc"]).sort_values(["kickoff_utc", "match_id"]).copy()
     df["prediction"] = df.apply(ranked_label, axis=1)
     df["week_start"] = (df["kickoff_utc"] - pd.to_timedelta(df["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
+    week_numbers = {week: idx for idx, week in enumerate(df["week_start"].drop_duplicates(), start=1)}
+    df["matchweek"] = df["week_start"].map(week_numbers)
+    df["matchup_number"] = df.groupby("week_start").cumcount() + 1
     has_team_names = {"home_team_name", "away_team_name"}.issubset(df.columns)
     if not has_team_names and not args.allow_id_matchup_key:
         raise RuntimeError(
@@ -134,14 +137,16 @@ def main() -> int:
     home_names = df["home_team_name"] if "home_team_name" in df.columns else df["home_team_id"]
     away_names = df["away_team_name"] if "away_team_name" in df.columns else df["away_team_id"]
     df["matchup_key"] = [
-        f"{idx}_{slug(home)}_{slug(away)}"
-        for idx, (home, away) in enumerate(zip(home_names, away_names), start=1)
+        f"{matchweek}_{slug(home)}_{slug(away)}"
+        for matchweek, home, away in zip(df["matchweek"], home_names, away_names)
     ]
 
     first_weeks = df["week_start"].drop_duplicates().head(args.weeks).tolist()
     out = df[df["week_start"].isin(first_weeks)].copy()
     display_cols = [
         "week_start",
+        "matchweek",
+        "matchup_number",
         "kickoff_utc",
         "competition_id",
         "season",

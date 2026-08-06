@@ -134,10 +134,12 @@ def first_fixture_weeks(df: pd.DataFrame, weeks: int) -> pd.DataFrame:
         return df
     out = df.copy()
     out["week_start"] = (out["kickoff_utc"] - pd.to_timedelta(out["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
-    out["matchup_number"] = range(1, len(out) + 1)
+    week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
+    out["matchweek"] = out["week_start"].map(week_numbers)
+    out["matchup_number"] = out.groupby("week_start").cumcount() + 1
     out["matchup_key"] = [
-        f"{number}_{slug(home)}_{slug(away)}"
-        for number, home, away in zip(out["matchup_number"], out["home_team_name"], out["away_team_name"])
+        f"{matchweek}_{slug(home)}_{slug(away)}"
+        for matchweek, home, away in zip(out["matchweek"], out["home_team_name"], out["away_team_name"])
     ]
     keep_weeks = out["week_start"].drop_duplicates().head(weeks).tolist()
     return out[out["week_start"].isin(keep_weeks)].copy()
@@ -146,6 +148,7 @@ def first_fixture_weeks(df: pd.DataFrame, weeks: int) -> pd.DataFrame:
 def display_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "week_start",
+        "matchweek",
         "matchup_number",
         "matchup_key",
         "kickoff_utc",
