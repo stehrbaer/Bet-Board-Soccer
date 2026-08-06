@@ -6,14 +6,20 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 
-LABEL_TO_TARGET = {"home": 0, "draw": 1, "away": 2}
-TARGET_TO_LABEL = {value: key for key, value in LABEL_TO_TARGET.items()}
+try:
+    from betboard_soccer_extension.modeling.draw_policy import DrawPolicy, apply_draw_policy, evaluate_draw_policy
+except ModuleNotFoundError:
+    if "__file__" in globals():
+        candidate = Path(__file__).resolve().parents[2] / "src"
+        if candidate.exists():
+            sys.path.insert(0, str(candidate))
+    from betboard_soccer_extension.modeling.draw_policy import DrawPolicy, apply_draw_policy, evaluate_draw_policy  # type: ignore[no-redef]
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-side-gap", default="0.06,0.08,0.10,0.12,0.15,0.18")
     parser.add_argument("--min-balanced-draw-p", default="0.20,0.22,0.24,0.26,0.28")
     parser.add_argument("--min-draw-pick-p", default="0.22,0.24,0.26,0.28,0.30")
+    parser.add_argument("--policy-version", default="draw_policy_tuned_v1")
     return parser.parse_args()
 
 
@@ -38,11 +45,6 @@ def read_predictions(path: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def base_pick(df: pd.DataFrame) -> pd.Series:
-    labels = np.array(["home", "draw", "away"])
-    return pd.Series(labels[np.argmax(df[["prob_home", "prob_draw", "prob_away"]].to_numpy(), axis=1)], index=df.index)
-
-
 def apply_policy(
     df: pd.DataFrame,
     min_draw_p: float,
@@ -51,51 +53,15 @@ def apply_policy(
     min_balanced_draw_p: float,
     min_draw_pick_p: float,
 ) -> pd.DataFrame:
-    out = df.copy()
-    out["raw_model_pick"] = base_pick(out)
-    out["top_side_prob"] = out[["prob_home", "prob_away"]].max(axis=1)
-    out["draw_gap"] = out["top_side_prob"] - out["prob_draw"]
-    out["home_away_gap"] = (out["prob_home"] - out["prob_away"]).abs()
-    out["draw_risk"] = (
-        (out["prob_draw"] >= min_draw_p)
-        | (out["draw_gap"] <= max_draw_gap)
-        | ((out["prob_draw"] >= min_balanced_draw_p) & (out["home_away_gap"] <= max_side_gap))
+    policy = DrawPolicy(
+        version="grid_candidate",
+        min_draw_p=min_draw_p,
+        max_draw_gap=max_draw_gap,
+        max_side_gap=max_side_gap,
+        min_balanced_draw_p=min_balanced_draw_p,
+        min_draw_pick_p=min_draw_pick_p,
     )
-    out["recommended_pick"] = out["raw_model_pick"]
-    out.loc[out["draw_risk"] & (out["prob_draw"] >= min_draw_pick_p), "recommended_pick"] = "draw"
-    return out
-
-
-def evaluate(policy_df: pd.DataFrame) -> dict[str, Any]:
-    actual = pd.to_numeric(policy_df["result_target"], errors="coerce").astype("Int64")
-    keep = actual.isin([0, 1, 2])
-    df = policy_df[keep].copy()
-    actual = actual[keep].astype(int)
-    raw_target = df["raw_model_pick"].map(LABEL_TO_TARGET)
-    rec_target = df["recommended_pick"].map(LABEL_TO_TARGET)
-    draw_actual = actual == LABEL_TO_TARGET["draw"]
-    draw_recommended = df["recommended_pick"] == "draw"
-    draw_risk = df["draw_risk"].astype(bool)
-
-    draw_pick_correct = int((draw_recommended & draw_actual).sum())
-    draw_pick_count = int(draw_recommended.sum())
-    actual_draw_count = int(draw_actual.sum())
-    return {
-        "rows": int(len(df)),
-        "actual_draw_rate": float(draw_actual.mean()),
-        "raw_accuracy": float((raw_target == actual).mean()),
-        "policy_accuracy": float((rec_target == actual).mean()),
-        "accuracy_delta": float((rec_target == actual).mean() - (raw_target == actual).mean()),
-        "raw_draw_pick_rate": float((df["raw_model_pick"] == "draw").mean()),
-        "policy_draw_pick_rate": float(draw_recommended.mean()),
-        "draw_risk_rate": float(draw_risk.mean()),
-        "draw_pick_precision": None if draw_pick_count == 0 else float(draw_pick_correct / draw_pick_count),
-        "draw_pick_recall": None if actual_draw_count == 0 else float(draw_pick_correct / actual_draw_count),
-        "draw_risk_recall": None if actual_draw_count == 0 else float((draw_risk & draw_actual).sum() / actual_draw_count),
-        "draw_risk_precision": None if int(draw_risk.sum()) == 0 else float((draw_risk & draw_actual).sum() / int(draw_risk.sum())),
-        "draw_pick_count": draw_pick_count,
-        "actual_draw_count": actual_draw_count,
-    }
+    return apply_draw_policy(df, policy)
 
 
 def tune(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
@@ -113,7 +79,7 @@ def tune(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
                             min_balanced_draw_p=min_balanced_draw_p,
                             min_draw_pick_p=min_draw_pick_p,
                         )
-                        metrics = evaluate(policy)
+                        metrics = evaluate_draw_policy(policy)
                         rows.append(
                             {
                                 "min_draw_p": min_draw_p,
@@ -143,7 +109,7 @@ def main() -> int:
 
     results = tune(df, args)
     raw = apply_policy(df, 1.0, -1.0, -1.0, 1.0, 1.0)
-    raw_metrics = evaluate(raw)
+    raw_metrics = evaluate_draw_policy(raw)
     best = results.iloc[0].to_dict()
     balanced = results[
         (results["policy_accuracy"] >= raw_metrics["raw_accuracy"] - 0.02)
@@ -152,17 +118,31 @@ def main() -> int:
 
     results_path = output_dir / "draw_threshold_grid.csv"
     best_path = output_dir / "best_draw_thresholds.json"
+    active_policy_path = output_dir / "active_draw_policy.json"
     balanced_path = output_dir / "balanced_draw_threshold_candidates.csv"
     results.to_csv(results_path, index=False)
     balanced.to_csv(balanced_path, index=False)
+    active_policy = DrawPolicy(
+        version=args.policy_version,
+        min_draw_p=float(best["min_draw_p"]),
+        max_draw_gap=float(best["max_draw_gap"]),
+        max_side_gap=float(best["max_side_gap"]),
+        min_balanced_draw_p=float(best["min_balanced_draw_p"]),
+        min_draw_pick_p=float(best["min_draw_pick_p"]),
+        source=args.predictions,
+        metrics={key: best[key] for key in best if key not in {"min_draw_p", "max_draw_gap", "max_side_gap", "min_balanced_draw_p", "min_draw_pick_p"}},
+    )
+    active_policy_path.write_text(json.dumps(active_policy.to_dict(), indent=2, default=str) + "\n")
     summary = {
         "predictions": args.predictions,
         "raw_metrics": raw_metrics,
         "best_by_accuracy": best,
+        "active_policy": active_policy.to_dict(),
         "outputs": {
             "grid": str(results_path),
             "balanced_candidates": str(balanced_path),
             "best": str(best_path),
+            "active_policy": str(active_policy_path),
         },
     }
     best_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")

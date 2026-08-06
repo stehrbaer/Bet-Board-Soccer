@@ -1,0 +1,24 @@
+{
+  "version": "draw_policy_eng1_2025_backtest_v1",
+  "min_draw_p": 0.3,
+  "max_draw_gap": 0.1,
+  "max_side_gap": 0.06,
+  "min_balanced_draw_p": 0.28,
+  "min_draw_pick_p": 0.22,
+  "source": "outputs/eng1_soccer_nn/test_predictions.parquet",
+  "metrics": {
+    "rows": 285,
+    "actual_draw_rate": 0.21052631578947367,
+    "raw_accuracy": 0.5263157894736842,
+    "policy_accuracy": 0.5333333333333333,
+    "accuracy_delta": 0.007017543859649145,
+    "raw_draw_pick_rate": 0.0,
+    "policy_draw_pick_rate": 0.05263157894736842,
+    "draw_pick_precision": 0.4,
+    "draw_pick_recall": 0.1,
+    "draw_risk_recall": 0.1,
+    "draw_risk_precision": 0.4,
+    "draw_pick_count": 15,
+    "actual_draw_count": 60
+  }
+}

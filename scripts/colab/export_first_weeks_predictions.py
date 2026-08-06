@@ -8,9 +8,20 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 import pandas as pd
+
+
+try:
+    from betboard_soccer_extension.modeling.draw_policy import apply_draw_policy, load_draw_policy
+except ModuleNotFoundError:
+    if "__file__" in globals():
+        candidate = Path(__file__).resolve().parents[2] / "src"
+        if candidate.exists():
+            sys.path.insert(0, str(candidate))
+    from betboard_soccer_extension.modeling.draw_policy import apply_draw_policy, load_draw_policy  # type: ignore[no-redef]
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +36,7 @@ def parse_args() -> argparse.Namespace:
         help="Gold dataset root used to auto-add team names when --gold-input is omitted.",
     )
     parser.add_argument("--allow-id-matchup-key", action="store_true", help="Allow matchup_key to fall back to team IDs.")
+    parser.add_argument("--draw-policy", default="configs/draw_policy_eng1.json", help="Optional draw policy JSON.")
     return parser.parse_args()
 
 
@@ -123,6 +135,9 @@ def main() -> int:
     df["kickoff_utc"] = pd.to_datetime(df["kickoff_utc"], errors="coerce", utc=True)
     df = df.dropna(subset=["kickoff_utc"]).sort_values(["kickoff_utc", "match_id"]).copy()
     df["prediction"] = df.apply(ranked_label, axis=1)
+    draw_policy = load_draw_policy(args.draw_policy) if args.draw_policy else None
+    if draw_policy is not None:
+        df = apply_draw_policy(df, draw_policy)
     df["week_start"] = (df["kickoff_utc"] - pd.to_timedelta(df["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
     week_numbers = {week: idx for idx, week in enumerate(df["week_start"].drop_duplicates(), start=1)}
     df["matchweek"] = df["week_start"].map(week_numbers)
@@ -161,6 +176,12 @@ def main() -> int:
         "prob_away",
         "prediction",
         "predicted_label",
+        "raw_model_pick",
+        "recommended_pick",
+        "draw_risk",
+        "draw_gap",
+        "home_away_gap",
+        "draw_policy_version",
     ]
     display_cols = [col for col in display_cols if col in out.columns]
     out = out[display_cols]
@@ -172,6 +193,7 @@ def main() -> int:
         "source_predictions": args.predictions,
         "team_name_sources": loaded_gold_paths,
         "has_team_names": {"home_team_name", "away_team_name"}.issubset(out.columns),
+        "draw_policy": None if draw_policy is None else draw_policy.to_dict(),
         "weeks": first_weeks,
         "rows": len(out),
         "output_csv": str(csv_path),

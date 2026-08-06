@@ -152,7 +152,8 @@ Before applying draw-risk logic to future fixtures, tune thresholds on held-out 
 ```bash
 python scripts/colab/tune_draw_thresholds.py \
   --predictions outputs/eng1_soccer_nn/test_predictions.parquet \
-  --output-dir outputs/eng1_soccer_nn/draw_threshold_tuning
+  --output-dir outputs/eng1_soccer_nn/draw_threshold_tuning \
+  --policy-version draw_policy_eng1_2025_backtest_v1
 ```
 
 This writes:
@@ -161,6 +162,7 @@ This writes:
 draw_threshold_grid.csv
 balanced_draw_threshold_candidates.csv
 best_draw_thresholds.json
+active_draw_policy.json
 ```
 
 Use `balanced_draw_threshold_candidates.csv` to choose thresholds that improve draw capture without materially reducing total pick accuracy.
@@ -189,6 +191,7 @@ python scripts/colab/predict_future_fixtures.py \
   --fixtures outputs/fixtures/espn_eng1_2026/eng.1_first_5_weeks_fixtures.csv \
   --model outputs/eng1_soccer_nn/soccer_three_way_nn.keras \
   --preprocessing outputs/eng1_soccer_nn/preprocessing.joblib \
+  --draw-policy configs/draw_policy_eng1.json \
   --history-partitions eng.1:2025,eng.2:2025,eng.3:2025 \
   --output-dir outputs/eng1_soccer_nn/future_2026
 ```
@@ -203,3 +206,14 @@ summary.json
 ```
 
 This is a first-pass future inference bridge. It uses each team's latest historical snapshot from the listed history partitions and imputes model features that are not available for future fixtures yet.
+
+Future prediction outputs include both the raw neural pick and draw-policy recommendation:
+
+```text
+raw_model_pick
+recommended_pick
+draw_risk
+draw_gap
+home_away_gap
+draw_policy_version
+```

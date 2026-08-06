@@ -13,11 +13,22 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 import joblib
 import numpy as np
 import pandas as pd
+
+
+try:
+    from betboard_soccer_extension.modeling.draw_policy import apply_draw_policy, load_draw_policy
+except ModuleNotFoundError:
+    if "__file__" in globals():
+        candidate = Path(__file__).resolve().parents[2] / "src"
+        if candidate.exists():
+            sys.path.insert(0, str(candidate))
+    from betboard_soccer_extension.modeling.draw_policy import apply_draw_policy, load_draw_policy  # type: ignore[no-redef]
 
 
 DEFAULT_GOLD_ROOT = "s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input"
@@ -36,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated competition:season partitions used for latest team snapshots.",
     )
     parser.add_argument("--output-dir", default="outputs/eng1_soccer_nn/future_2026")
+    parser.add_argument("--draw-policy", default="configs/draw_policy_eng1.json", help="Optional draw policy JSON.")
     return parser.parse_args()
 
 
@@ -254,6 +266,9 @@ def main() -> int:
     snapshots = make_team_snapshots(history)
     future_df, diagnostics = build_future_feature_frame(fixtures, feature_names, snapshots)
     predictions, trained_features = score_future_rows(args.model, args.preprocessing, future_df)
+    draw_policy = load_draw_policy(args.draw_policy) if args.draw_policy else None
+    if draw_policy is not None:
+        predictions = apply_draw_policy(predictions, draw_policy)
 
     feature_path = output_dir / "future_model_input.parquet"
     predictions_path = output_dir / "future_predictions.csv"
@@ -271,6 +286,7 @@ def main() -> int:
         "loaded_history": loaded_history,
         "fixtures_scored": len(predictions),
         "trained_features": len(trained_features),
+        "draw_policy": None if draw_policy is None else draw_policy.to_dict(),
         "outputs": {
             "future_model_input": str(feature_path),
             "future_predictions": str(predictions_path),
