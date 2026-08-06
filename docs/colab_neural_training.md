@@ -159,3 +159,27 @@ python scripts/colab/fetch_espn_fixtures.py \
 ```
 
 This writes raw ESPN JSON plus normalized fixture CSVs. These fixtures still need prematch features before the neural model can score them.
+
+## Future Fixture Predictions
+
+After `eng1` training finishes and future fixtures are fetched, score the first five EPL weeks:
+
+```bash
+python scripts/colab/predict_future_fixtures.py \
+  --fixtures outputs/fixtures/espn_eng1_2026/eng.1_first_5_weeks_fixtures.csv \
+  --model outputs/eng1_soccer_nn/soccer_three_way_nn.keras \
+  --preprocessing outputs/eng1_soccer_nn/preprocessing.joblib \
+  --history-partitions eng.1:2025,eng.2:2025,eng.3:2025 \
+  --output-dir outputs/eng1_soccer_nn/future_2026
+```
+
+This writes:
+
+```text
+future_predictions.csv
+future_model_input.parquet
+future_feature_diagnostics.csv
+summary.json
+```
+
+This is a first-pass future inference bridge. It uses each team's latest historical snapshot from the listed history partitions and imputes model features that are not available for future fixtures yet.
