@@ -135,6 +135,27 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --output-dir outputs/soccer_three_way_nn_full
 ```
 
+For a global domestic-league model, use the plain global output folder:
+
+```bash
+python scripts/colab/train_soccer_three_way_nn_optuna.py \
+  --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
+  --league all \
+  --full-scope-start-season 2021 \
+  --train-through-season 2024 \
+  --test-season 2025 \
+  --max-features 800 \
+  --n-folds 4 \
+  --val-size 250 \
+  --min-train-size 1200 \
+  --epochs 50 \
+  --n-trials 25 \
+  --next-games 5 \
+  --output-dir outputs/soccer_nn_global
+```
+
+With `--league all` and no explicit `--competitions`, the global run now targets full-scope regular domestic leagues only and defaults seasons to `2021` through `--test-season`. This avoids accidentally loading every lake partition, including cups, friendlies, UEFA competitions, partial 2026 partitions, and older one-off seasons.
+
 ## Artifacts
 
 The script writes these files early, before the model is complete:

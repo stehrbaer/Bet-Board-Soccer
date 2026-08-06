@@ -60,6 +60,20 @@ def test_required_scope_seasons_are_inclusive() -> None:
     assert module.required_scope_seasons("2021", "2025") == ["2021", "2022", "2023", "2024", "2025"]
 
 
+def test_global_default_scope_detects_plain_all_model() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(train_each_league=False, competitions="", league="all")
+
+    assert module.is_global_default_scope(args) is True
+
+
+def test_global_default_scope_does_not_override_explicit_competitions() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(train_each_league=False, competitions="eng.1,ger.1", league="all")
+
+    assert module.is_global_default_scope(args) is False
+
+
 def test_export_next_games_predictions_writes_compact_csv(tmp_path: Path) -> None:
     module = load_script_module()
     predictions = pd.DataFrame(

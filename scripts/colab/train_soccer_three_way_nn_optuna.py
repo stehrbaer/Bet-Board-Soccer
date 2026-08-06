@@ -364,6 +364,14 @@ def discover_full_scope_competitions(args: argparse.Namespace) -> tuple[list[str
     return selected, available
 
 
+def is_global_default_scope(args: argparse.Namespace) -> bool:
+    return (
+        not args.train_each_league
+        and not csv_list(args.competitions)
+        and [normalize_league(league) for league in csv_list(args.league)] in ([], ["all"])
+    )
+
+
 def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
     if filesystem is None:
         return pd.read_parquet(path)
@@ -812,7 +820,19 @@ def apply_smoke_overrides(args: argparse.Namespace) -> None:
 
 
 def run_training(args: argparse.Namespace, competitions: list[str], seasons: list[str], output_dir: Path, league_label: str | None = None) -> dict[str, Any]:
-    competitions = resolve_competitions(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = add_file_logging(output_dir)
+    available_scope: dict[str, list[str]] = {}
+    if is_global_default_scope(args):
+        competitions, available_scope = discover_full_scope_competitions(args)
+        if not competitions:
+            raise SystemExit("No full-scope competitions found for the requested global model settings.")
+        if not seasons:
+            seasons = required_scope_seasons(args.full_scope_start_season, args.test_season)
+            args.seasons = ",".join(seasons)
+        LOGGER.info("defaulting global model to full-scope regular leagues competitions=%s seasons=%s", competitions, seasons)
+    else:
+        competitions = resolve_competitions(args)
     if competitions and not seasons:
         args.seasons = default_partition_seasons(args.train_through_season, args.test_season)
         seasons = csv_list(args.seasons)
@@ -820,8 +840,6 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     if competitions and not seasons:
         raise SystemExit("--competitions requires --seasons so the script can target partition files.")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = add_file_logging(output_dir)
     LOGGER.info(
         "run config league=%s competitions=%s seasons=%s train_through=%s test=%s trials=%s epochs=%s smoke=%s",
         args.league,
@@ -841,6 +859,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "league": league_label or args.league,
             "competitions": competitions or ["all"],
             "seasons": seasons or ["all"],
+            "available_competition_seasons": available_scope,
             "train_through_season": args.train_through_season,
             "test_season": args.test_season,
             "max_features": args.max_features,
