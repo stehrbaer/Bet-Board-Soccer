@@ -145,6 +145,26 @@ first_5_weeks_summary.json
 
 The CSV includes `home_team_name`, `away_team_name`, and `matchup_key`.
 
+## Draw Threshold Tuning
+
+Before applying draw-risk logic to future fixtures, tune thresholds on held-out test predictions:
+
+```bash
+python scripts/colab/tune_draw_thresholds.py \
+  --predictions outputs/eng1_soccer_nn/test_predictions.parquet \
+  --output-dir outputs/eng1_soccer_nn/draw_threshold_tuning
+```
+
+This writes:
+
+```text
+draw_threshold_grid.csv
+balanced_draw_threshold_candidates.csv
+best_draw_thresholds.json
+```
+
+Use `balanced_draw_threshold_candidates.csv` to choose thresholds that improve draw capture without materially reducing total pick accuracy.
+
 ## Future Fixtures
 
 Fetch the first five weeks of the 2026-27 EPL schedule from ESPN:
