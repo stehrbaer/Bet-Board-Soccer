@@ -39,7 +39,7 @@ By default, `--smoke` uses `--league eng1` and seasons `2021-2025`.
 
 ## League Runs
 
-Use `--league` for normal Colab runs. Supported aliases include `eng1`, `epl`, `eng_1`, `esp1`, `ger1`, `ita1`, `fra1`, and `all`.
+Use `--league` for normal Colab runs. Supported aliases include `eng1`, `epl`, `eng_1`, `eng2`, `eng3`, `esp1`, `esp2`, `ger1`, `ger2`, `ita1`, `ita2`, `fra1`, `fra2`, `ned1`, `por1`, `sco1`, and `all`.
 
 ```bash
 python scripts/colab/train_soccer_three_way_nn_optuna.py \
@@ -63,6 +63,47 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --epochs 50 \
   --n-trials 25 \
   --output-dir outputs/all_soccer_nn
+```
+
+That creates one combined multi-league model. To train one separate model per league and keep outputs organized by league, use `--train-each-league`:
+
+```bash
+python scripts/colab/train_soccer_three_way_nn_optuna.py \
+  --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
+  --league all \
+  --train-each-league \
+  --full-scope-start-season 2021 \
+  --train-through-season 2024 \
+  --test-season 2025 \
+  --epochs 50 \
+  --n-trials 25 \
+  --output-dir outputs/soccer_nn_by_league
+```
+
+This writes:
+
+```text
+outputs/soccer_nn_by_league/batch_plan.json
+outputs/soccer_nn_by_league/batch_summary.json
+outputs/soccer_nn_by_league/eng1_soccer_nn/
+outputs/soccer_nn_by_league/ger1_soccer_nn/
+outputs/soccer_nn_by_league/ita1_soccer_nn/
+...
+```
+
+`--league all --train-each-league` discovers regular domestic league IDs only, such as `eng.1` and `ger.1`. Cup and UEFA competitions are skipped by default; pass them explicitly with `--competitions` if you want separate models for them.
+
+Current full `2021-2025` regular league scope in DigitalOcean:
+
+```text
+aut.1, den.1, eng.1, eng.2, eng.3, esp.1, esp.2, fra.1,
+fra.2, ger.1, ger.2, ita.1, ita.2, ned.1, por.1, sco.1
+```
+
+Partial-scope regular leagues found but not full `2021-2025`:
+
+```text
+jpn.1, mex.1, nor.1, swe.1, usa.1
 ```
 
 ## Full Run

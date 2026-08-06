@@ -25,6 +25,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
@@ -39,6 +40,12 @@ from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
 LOGGER = logging.getLogger("soccer_nn")
 
 LEAGUE_ALIASES = {
+    "aut1": "aut.1",
+    "aut_1": "aut.1",
+    "austria": "aut.1",
+    "den1": "den.1",
+    "den_1": "den.1",
+    "denmark": "den.1",
     "eng1": "eng.1",
     "eng_1": "eng.1",
     "epl": "eng.1",
@@ -46,19 +53,46 @@ LEAGUE_ALIASES = {
     "eng2": "eng.2",
     "eng_2": "eng.2",
     "championship": "eng.2",
+    "eng3": "eng.3",
+    "eng_3": "eng.3",
+    "leagueone": "eng.3",
     "esp1": "esp.1",
     "esp_1": "esp.1",
     "laliga": "esp.1",
+    "esp2": "esp.2",
+    "esp_2": "esp.2",
+    "laliga2": "esp.2",
     "ger1": "ger.1",
     "ger_1": "ger.1",
     "bundesliga": "ger.1",
+    "ger2": "ger.2",
+    "ger_2": "ger.2",
+    "bundesliga2": "ger.2",
     "ita1": "ita.1",
     "ita_1": "ita.1",
     "seriea": "ita.1",
+    "ita2": "ita.2",
+    "ita_2": "ita.2",
+    "serieb": "ita.2",
     "fra1": "fra.1",
     "fra_1": "fra.1",
     "ligue1": "fra.1",
+    "fra2": "fra.2",
+    "fra_2": "fra.2",
+    "ligue2": "fra.2",
+    "ned1": "ned.1",
+    "ned_1": "ned.1",
+    "eredivisie": "ned.1",
+    "por1": "por.1",
+    "por_1": "por.1",
+    "portugal": "por.1",
+    "sco1": "sco.1",
+    "sco_1": "sco.1",
+    "scotland": "sco.1",
 }
+
+CORE_LEAGUES = ["eng.1", "eng.2", "esp.1", "ger.1", "ita.1", "fra.1"]
+DOMESTIC_LEAGUE_PATTERN = re.compile(r"^[a-z]{3}\.\d+$")
 
 REQUIRED_MODEL_COLUMNS = [
     "match_id",
@@ -136,6 +170,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-trials", type=int, default=50)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--train-each-league",
+        action="store_true",
+        help="Train one separate model per selected league and write each under output-dir/<league_slug>_soccer_nn.",
+    )
+    parser.add_argument(
+        "--full-scope-start-season",
+        default="2021",
+        help="When using --train-each-league --league all, only include competitions with every season from this value through --test-season.",
+    )
+    parser.add_argument(
+        "--core-leagues-only",
+        action="store_true",
+        help="With --train-each-league --league all, limit discovery to the original core league set.",
+    )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
 
@@ -150,11 +199,14 @@ def setup_logging() -> None:
 
 def add_file_logging(output_dir: Path) -> Path:
     log_path = output_dir / "training.log"
-    if not any(isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path for handler in LOGGER.handlers):
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-        LOGGER.addHandler(file_handler)
+    for handler in list(LOGGER.handlers):
+        if isinstance(handler, logging.FileHandler):
+            LOGGER.removeHandler(handler)
+            handler.close()
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    LOGGER.addHandler(file_handler)
     return log_path
 
 
@@ -171,6 +223,10 @@ def normalize_league(value: str) -> str:
     if normalized == "all":
         return "all"
     return LEAGUE_ALIASES.get(normalized, normalized)
+
+
+def league_slug(competition_id: str) -> str:
+    return competition_id.lower().replace(".", "").replace("_", "").replace("-", "")
 
 
 def resolve_competitions(args: argparse.Namespace) -> list[str]:
@@ -238,6 +294,68 @@ def partition_paths(root: str, competitions: list[str], seasons: list[str]) -> l
     if not competitions or not seasons:
         return [root]
     return [f"{root.rstrip('/')}/competition={comp}/season={season}/part-000.parquet" for comp in competitions for season in seasons]
+
+
+def available_competition_seasons(root: str) -> dict[str, list[str]]:
+    """Return available gold competition seasons for local or S3 partition roots."""
+    root = root.rstrip("/")
+    if root.startswith("s3://"):
+        filesystem = s3_filesystem()
+        root_key = s3_key(root)
+        competitions = []
+        for key in filesystem.ls(root_key, detail=False):
+            name = key.rstrip("/").rsplit("/", 1)[-1]
+            if name.startswith("competition="):
+                competitions.append(name.removeprefix("competition="))
+        result: dict[str, list[str]] = {}
+        for competition in sorted(competitions):
+            season_prefix = f"{root_key}/competition={competition}"
+            seasons = []
+            for key in filesystem.ls(season_prefix, detail=False):
+                name = key.rstrip("/").rsplit("/", 1)[-1]
+                if name.startswith("season="):
+                    seasons.append(name.removeprefix("season="))
+            result[competition] = sorted(seasons, key=lambda item: int(item) if item.isdigit() else item)
+        return result
+
+    root_path = Path(root)
+    result = {}
+    for competition_dir in sorted(root_path.glob("competition=*")):
+        if not competition_dir.is_dir():
+            continue
+        competition = competition_dir.name.removeprefix("competition=")
+        seasons = [
+            season_dir.name.removeprefix("season=")
+            for season_dir in sorted(competition_dir.glob("season=*"))
+            if season_dir.is_dir()
+        ]
+        result[competition] = sorted(seasons, key=lambda item: int(item) if item.isdigit() else item)
+    return result
+
+
+def required_scope_seasons(start_season: str, test_season: str) -> list[str]:
+    try:
+        start = int(start_season)
+        end = int(test_season)
+    except ValueError:
+        return []
+    if start > end:
+        raise SystemExit("--full-scope-start-season cannot be after --test-season.")
+    return [str(season) for season in range(start, end + 1)]
+
+
+def discover_full_scope_competitions(args: argparse.Namespace) -> tuple[list[str], dict[str, list[str]]]:
+    available = available_competition_seasons(args.input)
+    required = required_scope_seasons(args.full_scope_start_season, args.test_season)
+    selected = []
+    for competition, seasons in available.items():
+        if args.core_leagues_only and competition not in CORE_LEAGUES:
+            continue
+        if not DOMESTIC_LEAGUE_PATTERN.match(competition):
+            continue
+        if all(season in seasons for season in required):
+            selected.append(competition)
+    return selected, available
 
 
 def read_parquet_path(path: str, filesystem=None) -> pd.DataFrame:
@@ -604,22 +722,22 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
     return model, fold, metrics, prediction_frame
 
 
-def main() -> int:
-    setup_logging()
-    args = parse_args()
-    if args.smoke:
-        args.n_trials = min(args.n_trials, 3)
-        args.epochs = min(args.epochs, 10)
-        args.max_features = min(args.max_features, 100)
-        args.n_folds = min(args.n_folds, 2)
-        args.val_size = min(args.val_size, 80)
-        args.min_train_size = min(args.min_train_size, 160)
-        if args.league == "all" and not args.competitions and not args.seasons:
-            args.league = "eng1"
-            args.seasons = "2021,2022,2023,2024,2025"
+def apply_smoke_overrides(args: argparse.Namespace) -> None:
+    if not args.smoke:
+        return
+    args.n_trials = min(args.n_trials, 3)
+    args.epochs = min(args.epochs, 10)
+    args.max_features = min(args.max_features, 100)
+    args.n_folds = min(args.n_folds, 2)
+    args.val_size = min(args.val_size, 80)
+    args.min_train_size = min(args.min_train_size, 160)
+    if args.league == "all" and not args.competitions and not args.seasons:
+        args.league = "eng1"
+        args.seasons = "2021,2022,2023,2024,2025"
 
+
+def run_training(args: argparse.Namespace, competitions: list[str], seasons: list[str], output_dir: Path, league_label: str | None = None) -> dict[str, Any]:
     competitions = resolve_competitions(args)
-    seasons = csv_list(args.seasons)
     if competitions and not seasons:
         args.seasons = default_partition_seasons(args.train_through_season, args.test_season)
         seasons = csv_list(args.seasons)
@@ -627,7 +745,6 @@ def main() -> int:
     if competitions and not seasons:
         raise SystemExit("--competitions requires --seasons so the script can target partition files.")
 
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = add_file_logging(output_dir)
     LOGGER.info(
@@ -646,7 +763,7 @@ def main() -> int:
         {
             "input": args.input,
             "output_dir": str(output_dir),
-            "league": args.league,
+            "league": league_label or args.league,
             "competitions": competitions or ["all"],
             "seasons": seasons or ["all"],
             "train_through_season": args.train_through_season,
@@ -771,6 +888,68 @@ def main() -> int:
     }
     summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
     print(json.dumps(summary, indent=2, default=str))
+    return summary
+
+
+def run_each_league(args: argparse.Namespace) -> int:
+    base_output_dir = Path(args.output_dir)
+    explicit_competitions = resolve_competitions(args)
+    if explicit_competitions:
+        competitions = explicit_competitions
+        available: dict[str, list[str]] = {}
+    else:
+        competitions, available = discover_full_scope_competitions(args)
+    if not competitions:
+        raise SystemExit("No full-scope competitions found for the requested settings.")
+
+    seasons = csv_list(args.seasons)
+    if not seasons:
+        seasons = required_scope_seasons(args.full_scope_start_season, args.test_season)
+        args.seasons = ",".join(seasons)
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        base_output_dir / "batch_plan.json",
+        {
+            "input": args.input,
+            "competitions": competitions,
+            "seasons": seasons,
+            "available_competition_seasons": available,
+            "output_layout": "output_dir/<league_slug>_soccer_nn",
+        },
+    )
+    LOGGER.info("batch league training plan competitions=%s seasons=%s output_dir=%s", competitions, seasons, base_output_dir)
+    summaries = []
+    for competition in competitions:
+        league_args = argparse.Namespace(**vars(args))
+        league_args.league = competition
+        league_args.competitions = competition
+        league_args.seasons = ",".join(seasons)
+        output_dir = base_output_dir / f"{league_slug(competition)}_soccer_nn"
+        LOGGER.info("batch league started competition=%s output_dir=%s", competition, output_dir)
+        summary = run_training(league_args, [competition], seasons, output_dir, league_label=league_slug(competition))
+        summaries.append(
+            {
+                "competition": competition,
+                "output_dir": str(output_dir),
+                "test_metrics": summary["test_metrics"],
+                "artifacts": summary["artifacts"],
+            }
+        )
+        write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "remaining": competitions[len(summaries) :]})
+    write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "remaining": []})
+    return 0
+
+
+def main() -> int:
+    setup_logging()
+    args = parse_args()
+    apply_smoke_overrides(args)
+    if args.train_each_league:
+        return run_each_league(args)
+
+    competitions = resolve_competitions(args)
+    seasons = csv_list(args.seasons)
+    run_training(args, competitions, seasons, Path(args.output_dir))
     return 0
 
 

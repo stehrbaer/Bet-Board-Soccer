@@ -27,6 +27,8 @@ def test_league_aliases_resolve_to_gold_partition_ids() -> None:
     assert module.normalize_league("eng1") == "eng.1"
     assert module.normalize_league("eng_1") == "eng.1"
     assert module.normalize_league("EPL") == "eng.1"
+    assert module.normalize_league("ger2") == "ger.2"
+    assert module.normalize_league("eredivisie") == "ned.1"
 
 
 def test_league_all_resolves_to_no_competition_filter() -> None:
@@ -41,3 +43,16 @@ def test_competitions_all_resolves_to_no_competition_filter() -> None:
     args = argparse.Namespace(league="eng1", competitions="all")
 
     assert module.resolve_competitions(args) == []
+
+
+def test_league_slug_for_output_folder_names() -> None:
+    module = load_script_module()
+
+    assert module.league_slug("eng.1") == "eng1"
+    assert module.league_slug("uefa.champions") == "uefachampions"
+
+
+def test_required_scope_seasons_are_inclusive() -> None:
+    module = load_script_module()
+
+    assert module.required_scope_seasons("2021", "2025") == ["2021", "2022", "2023", "2024", "2025"]
