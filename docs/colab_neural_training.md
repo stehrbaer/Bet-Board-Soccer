@@ -234,6 +234,29 @@ python scripts/colab/fetch_espn_fixtures.py \
 
 This writes raw ESPN JSON plus normalized fixture CSVs. These fixtures still need prematch features before the neural model can score them.
 
+To pull future fixtures for every full-scope league into league-specific folders:
+
+```bash
+python scripts/colab/fetch_espn_fixtures.py \
+  --league all \
+  --fetch-each-league \
+  --start-date 2026-08-01 \
+  --end-date 2026-09-30 \
+  --weeks 5 \
+  --output-dir outputs/fixtures/espn_by_league_2026
+```
+
+This writes:
+
+```text
+outputs/fixtures/espn_by_league_2026/batch_summary.json
+outputs/fixtures/espn_by_league_2026/eng1_fixtures/eng.1_first_5_weeks_fixtures.csv
+outputs/fixtures/espn_by_league_2026/ger1_fixtures/ger.1_first_5_weeks_fixtures.csv
+...
+```
+
+ESPN may not expose every lower league consistently. Batch mode records unavailable league endpoints under `failures` in `batch_summary.json` and keeps the successful fixture pulls.
+
 ## Future Fixture Predictions
 
 After `eng1` training finishes and future fixtures are fetched, score the first five EPL weeks:

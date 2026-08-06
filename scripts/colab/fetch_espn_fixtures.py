@@ -17,39 +17,124 @@ import requests
 ESPN_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 
 LEAGUE_ALIASES = {
+    "aut1": "aut.1",
+    "aut_1": "aut.1",
+    "austria": "aut.1",
+    "den1": "den.1",
+    "den_1": "den.1",
+    "denmark": "den.1",
     "eng1": "eng.1",
     "eng_1": "eng.1",
     "epl": "eng.1",
     "premierleague": "eng.1",
+    "eng2": "eng.2",
+    "eng_2": "eng.2",
+    "championship": "eng.2",
+    "eng3": "eng.3",
+    "eng_3": "eng.3",
+    "leagueone": "eng.3",
     "esp1": "esp.1",
     "esp_1": "esp.1",
     "laliga": "esp.1",
+    "esp2": "esp.2",
+    "esp_2": "esp.2",
+    "laliga2": "esp.2",
     "ger1": "ger.1",
     "ger_1": "ger.1",
     "bundesliga": "ger.1",
+    "ger2": "ger.2",
+    "ger_2": "ger.2",
+    "bundesliga2": "ger.2",
     "ita1": "ita.1",
     "ita_1": "ita.1",
     "seriea": "ita.1",
+    "ita2": "ita.2",
+    "ita_2": "ita.2",
+    "serieb": "ita.2",
     "fra1": "fra.1",
     "fra_1": "fra.1",
     "ligue1": "fra.1",
+    "fra2": "fra.2",
+    "fra_2": "fra.2",
+    "ligue2": "fra.2",
+    "jpn1": "jpn.1",
+    "jpn_1": "jpn.1",
+    "mex1": "mex.1",
+    "mex_1": "mex.1",
+    "ned1": "ned.1",
+    "ned_1": "ned.1",
+    "eredivisie": "ned.1",
+    "nor1": "nor.1",
+    "nor_1": "nor.1",
+    "por1": "por.1",
+    "por_1": "por.1",
+    "portugal": "por.1",
+    "sco1": "sco.1",
+    "sco_1": "sco.1",
+    "scotland": "sco.1",
+    "swe1": "swe.1",
+    "swe_1": "swe.1",
+    "usa1": "usa.1",
+    "usa_1": "usa.1",
+    "mls": "usa.1",
 }
+
+FULL_SCOPE_LEAGUES = [
+    "aut.1",
+    "den.1",
+    "eng.1",
+    "eng.2",
+    "eng.3",
+    "esp.1",
+    "esp.2",
+    "fra.1",
+    "fra.2",
+    "ger.1",
+    "ger.2",
+    "ita.1",
+    "ita.2",
+    "ned.1",
+    "por.1",
+    "sco.1",
+]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch future fixtures from ESPN.")
-    parser.add_argument("--league", default="eng1", help="League alias or ESPN slug, e.g. eng1, epl, eng.1.")
+    parser.add_argument("--league", default="eng1", help="League alias, ESPN slug, comma list, or all.")
     parser.add_argument("--start-date", required=True, help="Start date, YYYY-MM-DD.")
     parser.add_argument("--end-date", default="", help="End date, YYYY-MM-DD. Defaults to start + 60 days.")
     parser.add_argument("--weeks", type=int, default=5, help="Keep the first N fixture weeks in normalized output.")
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--output-dir", default="outputs/fixtures/espn_eng1_2026")
+    parser.add_argument(
+        "--fetch-each-league",
+        action="store_true",
+        help="Fetch each selected league into output-dir/<league_slug>_fixtures.",
+    )
     return parser.parse_args()
 
 
 def normalize_league(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_").replace(".", "_").replace(" ", "")
     return LEAGUE_ALIASES.get(normalized, value.strip().lower())
+
+
+def csv_list(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def league_slug(league: str) -> str:
+    return league.lower().replace(".", "").replace("_", "").replace("-", "")
+
+
+def resolve_leagues(value: str) -> list[str]:
+    leagues = [normalize_league(part) for part in csv_list(value)]
+    if not leagues or leagues == ["all"]:
+        return FULL_SCOPE_LEAGUES.copy()
+    if "all" in leagues:
+        raise SystemExit("--league all cannot be combined with specific leagues.")
+    return leagues
 
 
 def espn_date(value: str) -> str:
@@ -166,12 +251,8 @@ def display_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[[column for column in columns if column in df.columns]].copy()
 
 
-def main() -> int:
-    args = parse_args()
-    league = normalize_league(args.league)
+def fetch_league(args: argparse.Namespace, league: str, output_dir: Path, end_date: str) -> dict[str, Any]:
     start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_date = args.end_date or (start + timedelta(days=60)).strftime("%Y-%m-%d")
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     payload = fetch_scoreboard(league, args.start_date, end_date, args.limit)
@@ -198,6 +279,41 @@ def main() -> int:
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
     print(json.dumps(summary, indent=2, default=str))
+    return summary
+
+
+def main() -> int:
+    args = parse_args()
+    start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_date = args.end_date or (start + timedelta(days=60)).strftime("%Y-%m-%d")
+    output_dir = Path(args.output_dir)
+    leagues = resolve_leagues(args.league)
+    if not args.fetch_each_league and len(leagues) != 1:
+        raise SystemExit("Multiple leagues require --fetch-each-league.")
+
+    if args.fetch_each_league:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summaries = []
+        failures = []
+        for league in leagues:
+            league_output_dir = output_dir / f"{league_slug(league)}_fixtures"
+            try:
+                summaries.append(fetch_league(args, league, league_output_dir, end_date))
+            except Exception as exc:  # noqa: BLE001 - keep batch fetching resilient across ESPN league gaps.
+                failures.append({"league": league, "error": str(exc)})
+        batch_summary = {
+            "start_date": args.start_date,
+            "end_date": end_date,
+            "weeks": args.weeks,
+            "leagues_requested": leagues,
+            "completed": summaries,
+            "failures": failures,
+        }
+        (output_dir / "batch_summary.json").write_text(json.dumps(batch_summary, indent=2, default=str) + "\n")
+        print(json.dumps(batch_summary, indent=2, default=str))
+        return 1 if failures and not summaries else 0
+
+    fetch_league(args, leagues[0], output_dir, end_date)
     return 0
 
 
