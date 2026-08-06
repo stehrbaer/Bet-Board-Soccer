@@ -185,6 +185,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="With --train-each-league --league all, limit discovery to the original core league set.",
     )
+    parser.add_argument(
+        "--next-games",
+        type=int,
+        default=5,
+        help="Write the first N held-out test predictions by kickoff time for each training run. Use 0 to disable.",
+    )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
 
@@ -584,6 +590,75 @@ def dataset_profile(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
     }
 
 
+def text_slug(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def ranked_label(row: pd.Series) -> str:
+    scores = {
+        "home": row["prob_home"],
+        "draw": row["prob_draw"],
+        "away": row["prob_away"],
+    }
+    return max(scores, key=scores.get)
+
+
+def export_next_games_predictions(predictions: pd.DataFrame, output_dir: Path, count: int) -> dict[str, Any] | None:
+    if count <= 0:
+        return None
+    if predictions.empty:
+        return None
+    out = predictions.copy()
+    out["kickoff_utc"] = pd.to_datetime(out["kickoff_utc"], errors="coerce", utc=True)
+    out = out.dropna(subset=["kickoff_utc"]).sort_values(["kickoff_utc", "match_id"]).head(count).copy()
+    out["prediction"] = out.apply(ranked_label, axis=1)
+    if "predicted_label" not in out.columns and "predicted_target" in out.columns:
+        out["predicted_label"] = out["predicted_target"].map(TARGET_LABELS)
+    home_names = out["home_team_name"] if "home_team_name" in out.columns else out["home_team_id"]
+    away_names = out["away_team_name"] if "away_team_name" in out.columns else out["away_team_id"]
+    out["matchup_number"] = range(1, len(out) + 1)
+    out["matchup_key"] = [
+        f"{idx}_{text_slug(home)}_{text_slug(away)}"
+        for idx, home, away in zip(out["matchup_number"], home_names, away_names)
+    ]
+
+    display_cols = [
+        "matchup_number",
+        "matchup_key",
+        "kickoff_utc",
+        "competition_id",
+        "season",
+        "match_id",
+        "home_team_id",
+        "home_team_name",
+        "away_team_id",
+        "away_team_name",
+        "prob_home",
+        "prob_draw",
+        "prob_away",
+        "prediction",
+        "predicted_label",
+        "result_target",
+    ]
+    display_cols = [column for column in display_cols if column in out.columns]
+    out = out[display_cols]
+
+    csv_path = output_dir / f"next_{count}_games_predictions.csv"
+    json_path = output_dir / f"next_{count}_games_summary.json"
+    out.to_csv(csv_path, index=False)
+    summary = {
+        "rows": len(out),
+        "source": "held_out_test_predictions",
+        "output_csv": str(csv_path),
+        "kickoff_min": None if out.empty else str(out["kickoff_utc"].min()),
+        "kickoff_max": None if out.empty else str(out["kickoff_utc"].max()),
+    }
+    json_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
+    return {"csv": str(csv_path), "summary": str(json_path), "rows": len(out)}
+
+
 def save_trial_progress(output_dir: Path):
     def callback(study: optuna.Study, trial: optuna.Trial) -> None:
         trials_path = output_dir / "optuna_trials.csv"
@@ -777,6 +852,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "patience": args.patience,
             "seed": args.seed,
             "smoke": args.smoke,
+            "next_games": args.next_games,
             "log_file": str(log_path),
         },
     )
@@ -854,6 +930,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     predictions.to_parquet(predictions_path, index=False)
     study.trials_dataframe().to_csv(trials_path, index=False)
     features_path.write_text(json.dumps(fold.feature_names, indent=2) + "\n")
+    next_games_artifact = export_next_games_predictions(predictions, output_dir, args.next_games)
     config = TrainingConfig(
         input=args.input,
         output_dir=str(output_dir),
@@ -882,6 +959,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "predictions": str(predictions_path),
             "trials": str(trials_path),
             "features": str(features_path),
+            "next_games": next_games_artifact,
         },
         "candidate_features": len(feature_cols),
         "trained_features": len(fold.feature_names),
@@ -933,6 +1011,7 @@ def run_each_league(args: argparse.Namespace) -> int:
                 "output_dir": str(output_dir),
                 "test_metrics": summary["test_metrics"],
                 "artifacts": summary["artifacts"],
+                "next_games": summary["artifacts"].get("next_games"),
             }
         )
         write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "remaining": competitions[len(summaries) :]})

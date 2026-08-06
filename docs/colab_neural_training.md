@@ -77,6 +77,7 @@ python scripts/colab/train_soccer_three_way_nn_optuna.py \
   --test-season 2025 \
   --epochs 50 \
   --n-trials 25 \
+  --next-games 5 \
   --output-dir outputs/soccer_nn_by_league
 ```
 
@@ -90,6 +91,16 @@ outputs/soccer_nn_by_league/ger1_soccer_nn/
 outputs/soccer_nn_by_league/ita1_soccer_nn/
 ...
 ```
+
+Each league folder includes the full held-out test predictions plus a compact next-games CSV:
+
+```text
+test_predictions.parquet
+next_5_games_predictions.csv
+next_5_games_summary.json
+```
+
+`next_5_games_predictions.csv` is ordered by kickoff time within that league's held-out test season. Use `--next-games 10` for ten games or `--next-games 0` to skip the compact export.
 
 `--league all --train-each-league` discovers regular domestic league IDs only, such as `eng.1` and `ger.1`. Cup and UEFA competitions are skipped by default; pass them explicitly with `--competitions` if you want separate models for them.
 
