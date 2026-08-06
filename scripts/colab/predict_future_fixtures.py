@@ -60,9 +60,32 @@ def s3_storage_options() -> dict[str, Any] | None:
     }
 
 
+def s3_filesystem():
+    storage_options = s3_storage_options()
+    if storage_options is None:
+        raise SystemExit(
+            "DigitalOcean Spaces credentials are missing. In Colab set:\n"
+            '  os.environ["DO_SPACES_KEY"] = "your_access_key"\n'
+            '  os.environ["DO_SPACES_SECRET"] = "your_secret_key"\n'
+            'Optional endpoint defaults to https://fra1.digitaloceanspaces.com.'
+        )
+    try:
+        import s3fs
+    except ModuleNotFoundError as exc:
+        raise SystemExit("s3fs is missing. In Colab run: !pip install -r requirements-colab.txt") from exc
+    return s3fs.S3FileSystem(**storage_options)
+
+
+def s3_key(path: str) -> str:
+    return path.removeprefix("s3://")
+
+
 def read_parquet(path: str) -> pd.DataFrame:
-    storage_options = s3_storage_options() if path.startswith("s3://") else None
-    return pd.read_parquet(path, storage_options=storage_options)
+    if not path.startswith("s3://"):
+        return pd.read_parquet(path)
+    filesystem = s3_filesystem()
+    with filesystem.open(s3_key(path), "rb") as handle:
+        return pd.read_parquet(handle)
 
 
 def partition_path(root: str, partition: str) -> str:
