@@ -344,6 +344,51 @@ home_away_gap
 draw_policy_version
 ```
 
+To score every league-specific model against the pulled first-five-week fixture files:
+
+```bash
+python scripts/colab/predict_future_fixtures.py \
+  --predict-each-league \
+  --fixtures-root outputs/fixtures/espn_by_league_2026 \
+  --models-root outputs/soccer_nn_by_league \
+  --history-season 2025 \
+  --use-league-draw-policy
+```
+
+This reads:
+
+```text
+outputs/fixtures/espn_by_league_2026/*_fixtures/*_first_5_weeks_fixtures.csv
+outputs/soccer_nn_by_league/*_soccer_nn/soccer_three_way_nn.keras
+outputs/soccer_nn_by_league/*_soccer_nn/preprocessing.joblib
+```
+
+and writes:
+
+```text
+outputs/soccer_nn_by_league/eng1_soccer_nn/future_2026/future_predictions.csv
+outputs/soccer_nn_by_league/ger1_soccer_nn/future_2026/future_predictions.csv
+outputs/soccer_nn_by_league/future_prediction_batch_summary.json
+```
+
+If you want to score every league fixture file with the global model instead:
+
+```bash
+python scripts/colab/predict_future_fixtures.py \
+  --predict-each-league \
+  --fixtures-root outputs/fixtures/espn_by_league_2026 \
+  --global-model-dir outputs/soccer_nn_global \
+  --history-season 2025
+```
+
+Global-model outputs are grouped by league:
+
+```text
+outputs/soccer_nn_global/future_2026/eng1/future_predictions.csv
+outputs/soccer_nn_global/future_2026/ger1/future_predictions.csv
+outputs/soccer_nn_global/future_prediction_batch_summary.json
+```
+
 ## Explanation Graph
 
 Build a matchup-filterable graph for future predictions:

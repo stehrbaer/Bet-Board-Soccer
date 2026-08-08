@@ -33,11 +33,18 @@ except ModuleNotFoundError:
 
 DEFAULT_GOLD_ROOT = "s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input"
 DEFAULT_HISTORY_PARTITIONS = "eng.1:2025,eng.2:2025,eng.3:2025"
+COUNTRY_HISTORY_COMPETITIONS = {
+    "eng": ["eng.1", "eng.2", "eng.3"],
+    "esp": ["esp.1", "esp.2"],
+    "fra": ["fra.1", "fra.2"],
+    "ger": ["ger.1", "ger.2"],
+    "ita": ["ita.1", "ita.2"],
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Predict future soccer fixtures from a trained neural model.")
-    parser.add_argument("--fixtures", required=True, help="Normalized fixture CSV from fetch_espn_fixtures.py.")
+    parser.add_argument("--fixtures", default="", help="Normalized fixture CSV from fetch_espn_fixtures.py.")
     parser.add_argument("--model", default="outputs/eng1_soccer_nn/soccer_three_way_nn.keras")
     parser.add_argument("--preprocessing", default="outputs/eng1_soccer_nn/preprocessing.joblib")
     parser.add_argument("--gold-root", default=DEFAULT_GOLD_ROOT)
@@ -48,6 +55,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default="outputs/eng1_soccer_nn/future_2026")
     parser.add_argument("--draw-policy", default="configs/draw_policy_eng1.json", help="Optional draw policy JSON.")
+    parser.add_argument(
+        "--predict-each-league",
+        action="store_true",
+        help="Score every first-weeks fixture file under --fixtures-root.",
+    )
+    parser.add_argument("--fixtures-root", default="outputs/fixtures/espn_by_league_2026")
+    parser.add_argument("--models-root", default="outputs/soccer_nn_by_league")
+    parser.add_argument(
+        "--global-model-dir",
+        default="",
+        help="Optional global model dir. If set, batch mode uses this model for every league.",
+    )
+    parser.add_argument("--history-season", default="2025")
+    parser.add_argument(
+        "--use-league-draw-policy",
+        action="store_true",
+        help="In batch mode, prefer each model folder's draw_threshold_tuning/active_draw_policy.json.",
+    )
     return parser.parse_args()
 
 
@@ -55,6 +80,31 @@ def slug(value: object) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", "_", text)
     return text.strip("_")
+
+
+def league_slug(competition_id: str) -> str:
+    return competition_id.lower().replace(".", "").replace("_", "").replace("-", "")
+
+
+def competition_from_fixture_path(path: Path) -> str:
+    name = path.name
+    if "_first_" in name:
+        return name.split("_first_", maxsplit=1)[0]
+    if "_fixtures" in name:
+        return name.split("_fixtures", maxsplit=1)[0]
+    raise ValueError(f"Cannot infer competition id from fixture filename: {path}")
+
+
+def default_history_partitions_for_competition(competition_id: str, season: str) -> str:
+    country = competition_id.split(".", maxsplit=1)[0]
+    competitions = COUNTRY_HISTORY_COMPETITIONS.get(country, [competition_id])
+    if competition_id not in competitions:
+        competitions = [competition_id, *competitions]
+    return ",".join(f"{competition}:{season}" for competition in competitions)
+
+
+def batch_fixture_paths(fixtures_root: Path) -> list[Path]:
+    return sorted(fixtures_root.glob("*_fixtures/*_first_*_weeks_fixtures.csv"))
 
 
 def s3_storage_options() -> dict[str, Any] | None:
@@ -255,18 +305,24 @@ def score_future_rows(model_path: str, preprocessing_path: str, future_df: pd.Da
     return out, feature_names
 
 
-def main() -> int:
-    args = parse_args()
-    output_dir = Path(args.output_dir)
+def predict_fixture_file(
+    fixtures_path: Path,
+    model_path: Path,
+    preprocessing_path: Path,
+    output_dir: Path,
+    gold_root: str,
+    history_partitions: str,
+    draw_policy_path: str,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    feature_names = list(joblib.load(args.preprocessing)["feature_names"])
-    fixtures = pd.read_csv(args.fixtures)
-    history, loaded_history = load_history(args.gold_root, args.history_partitions)
+    feature_names = list(joblib.load(preprocessing_path)["feature_names"])
+    fixtures = pd.read_csv(fixtures_path)
+    history, loaded_history = load_history(gold_root, history_partitions)
     snapshots = make_team_snapshots(history)
     future_df, diagnostics = build_future_feature_frame(fixtures, feature_names, snapshots)
-    predictions, trained_features = score_future_rows(args.model, args.preprocessing, future_df)
-    draw_policy = load_draw_policy(args.draw_policy) if args.draw_policy else None
+    predictions, trained_features = score_future_rows(str(model_path), str(preprocessing_path), future_df)
+    draw_policy = load_draw_policy(draw_policy_path) if draw_policy_path else None
     if draw_policy is not None:
         predictions = apply_draw_policy(predictions, draw_policy)
 
@@ -279,10 +335,10 @@ def main() -> int:
     diagnostics.to_csv(diagnostics_path, index=False)
 
     summary = {
-        "fixtures": args.fixtures,
-        "model": args.model,
-        "preprocessing": args.preprocessing,
-        "history_partitions": args.history_partitions,
+        "fixtures": str(fixtures_path),
+        "model": str(model_path),
+        "preprocessing": str(preprocessing_path),
+        "history_partitions": history_partitions,
         "loaded_history": loaded_history,
         "fixtures_scored": len(predictions),
         "trained_features": len(trained_features),
@@ -295,6 +351,98 @@ def main() -> int:
         "warning": "Future rows use latest historical team snapshots; unavailable future-only features are imputed.",
     }
     summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
+    return summary
+
+
+def model_dir_for_competition(args: argparse.Namespace, competition_id: str) -> Path:
+    if args.global_model_dir:
+        return Path(args.global_model_dir)
+    return Path(args.models_root) / f"{league_slug(competition_id)}_soccer_nn"
+
+
+def draw_policy_for_model_dir(model_dir: Path, fallback: str, use_league_draw_policy: bool) -> str:
+    if use_league_draw_policy:
+        candidate = model_dir / "draw_threshold_tuning" / "active_draw_policy.json"
+        if candidate.exists():
+            return str(candidate)
+    return fallback
+
+
+def predict_each_league(args: argparse.Namespace) -> dict[str, Any]:
+    fixtures_root = Path(args.fixtures_root)
+    fixtures_paths = batch_fixture_paths(fixtures_root)
+    if not fixtures_paths:
+        raise RuntimeError(f"No first-weeks fixture CSV files found under {fixtures_root}.")
+
+    completed = []
+    failures = []
+    for fixtures_path in fixtures_paths:
+        try:
+            competition_id = competition_from_fixture_path(fixtures_path)
+            model_dir = model_dir_for_competition(args, competition_id)
+            model_path = model_dir / "soccer_three_way_nn.keras"
+            preprocessing_path = model_dir / "preprocessing.joblib"
+            if not model_path.exists():
+                raise FileNotFoundError(f"Missing model: {model_path}")
+            if not preprocessing_path.exists():
+                raise FileNotFoundError(f"Missing preprocessing: {preprocessing_path}")
+            output_dir = model_dir / "future_2026" / league_slug(competition_id) if args.global_model_dir else model_dir / "future_2026"
+            history_partitions = default_history_partitions_for_competition(competition_id, args.history_season)
+            draw_policy_path = draw_policy_for_model_dir(model_dir, args.draw_policy, args.use_league_draw_policy)
+            summary = predict_fixture_file(
+                fixtures_path=fixtures_path,
+                model_path=model_path,
+                preprocessing_path=preprocessing_path,
+                output_dir=output_dir,
+                gold_root=args.gold_root,
+                history_partitions=history_partitions,
+                draw_policy_path=draw_policy_path,
+            )
+            completed.append(
+                {
+                    "competition_id": competition_id,
+                    "fixtures": str(fixtures_path),
+                    "model_dir": str(model_dir),
+                    "output_dir": str(output_dir),
+                    "fixtures_scored": summary["fixtures_scored"],
+                    "future_predictions": summary["outputs"]["future_predictions"],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - keep batch prediction going across missing leagues.
+            failures.append({"fixtures": str(fixtures_path), "error": str(exc)})
+
+    batch_summary = {
+        "fixtures_root": str(fixtures_root),
+        "models_root": args.models_root,
+        "global_model_dir": args.global_model_dir,
+        "history_season": args.history_season,
+        "completed": completed,
+        "failures": failures,
+    }
+    summary_root = Path(args.global_model_dir) if args.global_model_dir else Path(args.models_root)
+    summary_root.mkdir(parents=True, exist_ok=True)
+    summary_path = summary_root / "future_prediction_batch_summary.json"
+    summary_path.write_text(json.dumps(batch_summary, indent=2, default=str) + "\n")
+    print(json.dumps(batch_summary, indent=2, default=str))
+    return batch_summary
+
+
+def main() -> int:
+    args = parse_args()
+    if args.predict_each_league:
+        predict_each_league(args)
+        return 0
+    if not args.fixtures:
+        raise SystemExit("--fixtures is required unless --predict-each-league is set.")
+    summary = predict_fixture_file(
+        fixtures_path=Path(args.fixtures),
+        model_path=Path(args.model),
+        preprocessing_path=Path(args.preprocessing),
+        output_dir=Path(args.output_dir),
+        gold_root=args.gold_root,
+        history_partitions=args.history_partitions,
+        draw_policy_path=args.draw_policy,
+    )
     print(json.dumps(summary, indent=2, default=str))
     return 0
 
