@@ -104,6 +104,24 @@ next_5_games_summary.json
 
 `--league all --train-each-league` discovers regular domestic league IDs only, such as `eng.1` and `ger.1`. Cup and UEFA competitions are skipped by default; pass them explicitly with `--competitions` if you want separate models for them.
 
+Smaller leagues automatically downscale walk-forward fold settings when the default `--min-train-size 600 --val-size 200` does not fit. For example, `aut.1` has fewer rows than the larger leagues, so the script reduces validation and minimum train windows instead of failing. Use `--no-auto-fold-size` only if you want strict fixed fold settings.
+
+To resume a long batch without retraining completed leagues:
+
+```bash
+python scripts/colab/train_soccer_three_way_nn_optuna.py \
+  --input s3://betboard-ml-artifacts/soccer-prediction-data/gold/prematch_model_input \
+  --league all \
+  --train-each-league \
+  --train-through-season 2024 \
+  --test-season 2025 \
+  --epochs 50 \
+  --n-trials 25 \
+  --next-games 5 \
+  --skip-existing \
+  --output-dir outputs/soccer_nn_by_league
+```
+
 Current full `2021-2025` regular league scope in DigitalOcean:
 
 ```text

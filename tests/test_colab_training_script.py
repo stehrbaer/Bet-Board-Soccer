@@ -74,6 +74,29 @@ def test_global_default_scope_does_not_override_explicit_competitions() -> None:
     assert module.is_global_default_scope(args) is False
 
 
+def test_resolve_fold_settings_downscales_small_league() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(n_folds=4, val_size=200, min_train_size=600, no_auto_fold_size=False)
+
+    n_folds, val_size, min_train_size, metadata = module.resolve_fold_settings(722, args)
+
+    assert n_folds == 4
+    assert val_size < 200
+    assert min_train_size < 600
+    assert min_train_size + val_size < 722
+    assert metadata["adjusted"] is True
+
+
+def test_resolve_fold_settings_keeps_large_league_defaults() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(n_folds=4, val_size=200, min_train_size=600, no_auto_fold_size=False)
+
+    n_folds, val_size, min_train_size, metadata = module.resolve_fold_settings(1200, args)
+
+    assert (n_folds, val_size, min_train_size) == (4, 200, 600)
+    assert metadata["adjusted"] is False
+
+
 def test_export_next_games_predictions_writes_compact_csv(tmp_path: Path) -> None:
     module = load_script_module()
     predictions = pd.DataFrame(

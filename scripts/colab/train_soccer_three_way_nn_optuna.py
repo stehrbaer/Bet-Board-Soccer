@@ -166,6 +166,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-folds", type=int, default=4)
     parser.add_argument("--val-size", type=int, default=200)
     parser.add_argument("--min-train-size", type=int, default=600)
+    parser.add_argument(
+        "--no-auto-fold-size",
+        action="store_true",
+        help="Disable automatic walk-forward fold downscaling for smaller leagues.",
+    )
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--n-trials", type=int, default=50)
     parser.add_argument("--patience", type=int, default=12)
@@ -174,6 +179,11 @@ def parse_args() -> argparse.Namespace:
         "--train-each-league",
         action="store_true",
         help="Train one separate model per selected league and write each under output-dir/<league_slug>_soccer_nn.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="In --train-each-league mode, skip league folders that already contain model, preprocessing, predictions, and summary artifacts.",
     )
     parser.add_argument(
         "--full-scope-start-season",
@@ -855,6 +865,39 @@ def export_next_games_predictions(predictions: pd.DataFrame, output_dir: Path, c
     return {"csv": str(csv_path), "summary": str(json_path), "rows": len(out)}
 
 
+def resolve_fold_settings(train_rows: int, args: argparse.Namespace) -> tuple[int, int, int, dict[str, Any]]:
+    requested = {
+        "n_folds": args.n_folds,
+        "val_size": args.val_size,
+        "min_train_size": args.min_train_size,
+    }
+    if args.no_auto_fold_size or train_rows > args.min_train_size + args.val_size:
+        return args.n_folds, args.val_size, args.min_train_size, {"requested": requested, "adjusted": False}
+
+    if train_rows < 240:
+        raise ValueError(
+            f"Not enough rows for walk-forward folds even with auto sizing: rows={train_rows}. "
+            "Use more seasons or exclude this league."
+        )
+
+    val_size = min(args.val_size, max(50, train_rows // 5))
+    min_train_size = min(args.min_train_size, max(120, train_rows - (2 * val_size)))
+    if train_rows - val_size <= min_train_size:
+        min_train_size = max(120, train_rows - val_size - 1)
+    if train_rows - val_size <= min_train_size:
+        raise ValueError(
+            f"Not enough rows for walk-forward folds after auto sizing: rows={train_rows}, "
+            f"min_train_size={min_train_size}, val_size={val_size}"
+        )
+    n_folds = min(args.n_folds, max(1, train_rows - min_train_size - val_size + 1))
+    metadata = {
+        "requested": requested,
+        "adjusted": True,
+        "reason": "train_rows did not exceed requested min_train_size + val_size",
+    }
+    return n_folds, val_size, min_train_size, metadata
+
+
 def save_trial_progress(output_dir: Path):
     def callback(study: optuna.Study, trial: optuna.Trial) -> None:
         trials_path = output_dir / "optuna_trials.csv"
@@ -1054,6 +1097,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "n_folds": args.n_folds,
             "val_size": args.val_size,
             "min_train_size": args.min_train_size,
+            "no_auto_fold_size": args.no_auto_fold_size,
             "epochs": args.epochs,
             "n_trials": args.n_trials,
             "patience": args.patience,
@@ -1105,7 +1149,17 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         },
     )
     LOGGER.info("building walk-forward folds")
-    folds = make_walkforward_folds(train_all, args.n_folds, args.val_size, args.min_train_size)
+    n_folds, val_size, min_train_size, fold_settings = resolve_fold_settings(len(train_all), args)
+    if fold_settings["adjusted"]:
+        LOGGER.info(
+            "auto-adjusted fold settings train_rows=%s n_folds=%s val_size=%s min_train_size=%s requested=%s",
+            len(train_all),
+            n_folds,
+            val_size,
+            min_train_size,
+            fold_settings["requested"],
+        )
+    folds = make_walkforward_folds(train_all, n_folds, val_size, min_train_size)
     LOGGER.info("selected features=%s folds=%s", len(feature_cols), len(folds))
     print(json.dumps({"rows": len(df), "train_rows": len(train_all), "test_rows": len(test), "features": len(feature_cols)}, indent=2))
     features_path = output_dir / "feature_columns.json"
@@ -1163,6 +1217,14 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     summary = {
         "config": asdict(config),
         "load_engine": load_engine,
+        "fold_settings": {
+            **fold_settings,
+            "effective": {
+                "n_folds": n_folds,
+                "val_size": val_size,
+                "min_train_size": min_train_size,
+            },
+        },
         "best_value": study.best_value,
         "best_params": study.best_params,
         "best_trial_attrs": study.best_trial.user_attrs,
@@ -1211,25 +1273,58 @@ def run_each_league(args: argparse.Namespace) -> int:
     )
     LOGGER.info("batch league training plan competitions=%s seasons=%s output_dir=%s", competitions, seasons, base_output_dir)
     summaries = []
-    for competition in competitions:
+    failures = []
+    for idx, competition in enumerate(competitions):
         league_args = argparse.Namespace(**vars(args))
         league_args.league = competition
         league_args.competitions = competition
         league_args.seasons = ",".join(seasons)
         output_dir = base_output_dir / f"{league_slug(competition)}_soccer_nn"
         LOGGER.info("batch league started competition=%s output_dir=%s", competition, output_dir)
-        summary = run_training(league_args, [competition], seasons, output_dir, league_label=league_slug(competition))
-        summaries.append(
+        required_artifacts = [
+            output_dir / "soccer_three_way_nn.keras",
+            output_dir / "preprocessing.joblib",
+            output_dir / "test_predictions.parquet",
+            output_dir / "summary.json",
+        ]
+        if args.skip_existing and all(path.exists() for path in required_artifacts):
+            LOGGER.info("batch league skipped existing artifacts competition=%s output_dir=%s", competition, output_dir)
+            summaries.append({"competition": competition, "output_dir": str(output_dir), "skipped": True})
+            write_json(
+                base_output_dir / "batch_summary.json",
+                {
+                    "completed": summaries,
+                    "failures": failures,
+                    "remaining": competitions[idx + 1 :],
+                },
+            )
+            continue
+        try:
+            summary = run_training(league_args, [competition], seasons, output_dir, league_label=league_slug(competition))
+            summaries.append(
+                {
+                    "competition": competition,
+                    "output_dir": str(output_dir),
+                    "test_metrics": summary["test_metrics"],
+                    "fold_settings": summary["fold_settings"],
+                    "artifacts": summary["artifacts"],
+                    "next_games": summary["artifacts"].get("next_games"),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - keep long batch training moving across small/problem leagues.
+            LOGGER.exception("batch league failed competition=%s output_dir=%s", competition, output_dir)
+            failures.append({"competition": competition, "output_dir": str(output_dir), "error": str(exc)})
+            output_dir.mkdir(parents=True, exist_ok=True)
+            write_json(output_dir / "failed_summary.json", failures[-1])
+        write_json(
+            base_output_dir / "batch_summary.json",
             {
-                "competition": competition,
-                "output_dir": str(output_dir),
-                "test_metrics": summary["test_metrics"],
-                "artifacts": summary["artifacts"],
-                "next_games": summary["artifacts"].get("next_games"),
-            }
+                "completed": summaries,
+                "failures": failures,
+                "remaining": competitions[idx + 1 :],
+            },
         )
-        write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "remaining": competitions[len(summaries) :]})
-    write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "remaining": []})
+    write_json(base_output_dir / "batch_summary.json", {"completed": summaries, "failures": failures, "remaining": []})
     return 0
 
 
