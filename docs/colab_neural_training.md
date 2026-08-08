@@ -243,6 +243,33 @@ active_draw_policy.json
 
 Use `balanced_draw_threshold_candidates.csv` to choose thresholds that improve draw capture without materially reducing total pick accuracy.
 
+To tune every league-specific model folder:
+
+```bash
+python scripts/colab/tune_draw_thresholds.py \
+  --tune-each-league \
+  --models-root outputs/soccer_nn_by_league
+```
+
+This scans for:
+
+```text
+outputs/soccer_nn_by_league/*/test_predictions.parquet
+```
+
+and writes each league's policy under:
+
+```text
+outputs/soccer_nn_by_league/eng1_soccer_nn/draw_threshold_tuning/
+outputs/soccer_nn_by_league/ger1_soccer_nn/draw_threshold_tuning/
+```
+
+It also writes:
+
+```text
+outputs/soccer_nn_by_league/draw_threshold_batch_summary.json
+```
+
 ## Future Fixtures
 
 Fetch the first five weeks of the 2026-27 EPL schedule from ESPN:

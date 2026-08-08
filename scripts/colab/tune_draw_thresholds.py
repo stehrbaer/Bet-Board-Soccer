@@ -24,8 +24,15 @@ except ModuleNotFoundError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune draw-risk thresholds from held-out prediction results.")
-    parser.add_argument("--predictions", required=True, help="Path to test_predictions.parquet or CSV.")
+    parser.add_argument("--predictions", default="", help="Path to test_predictions.parquet or CSV.")
     parser.add_argument("--output-dir", default="outputs/eng1_soccer_nn/draw_threshold_tuning")
+    parser.add_argument(
+        "--tune-each-league",
+        action="store_true",
+        help="Tune every model folder under --models-root that contains test_predictions.parquet.",
+    )
+    parser.add_argument("--models-root", default="outputs/soccer_nn_by_league")
+    parser.add_argument("--prediction-filename", default="test_predictions.parquet")
     parser.add_argument("--min-draw-p", default="0.20,0.22,0.24,0.26,0.28,0.30,0.32")
     parser.add_argument("--max-draw-gap", default="0.02,0.04,0.06,0.08,0.10,0.12")
     parser.add_argument("--max-side-gap", default="0.06,0.08,0.10,0.12,0.15,0.18")
@@ -97,15 +104,13 @@ def tune(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def main() -> int:
-    args = parse_args()
-    output_dir = Path(args.output_dir)
+def tune_prediction_file(predictions_path: Path, output_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    df = read_predictions(args.predictions)
+    df = read_predictions(str(predictions_path))
     required = {"prob_home", "prob_draw", "prob_away", "result_target"}
     missing = sorted(required - set(df.columns))
     if missing:
-        raise RuntimeError(f"Prediction file is missing required columns: {missing}")
+        raise RuntimeError(f"Prediction file {predictions_path} is missing required columns: {missing}")
 
     results = tune(df, args)
     raw = apply_policy(df, 1.0, -1.0, -1.0, 1.0, 1.0)
@@ -129,12 +134,12 @@ def main() -> int:
         max_side_gap=float(best["max_side_gap"]),
         min_balanced_draw_p=float(best["min_balanced_draw_p"]),
         min_draw_pick_p=float(best["min_draw_pick_p"]),
-        source=args.predictions,
+        source=str(predictions_path),
         metrics={key: best[key] for key in best if key not in {"min_draw_p", "max_draw_gap", "max_side_gap", "min_balanced_draw_p", "min_draw_pick_p"}},
     )
     active_policy_path.write_text(json.dumps(active_policy.to_dict(), indent=2, default=str) + "\n")
     summary = {
-        "predictions": args.predictions,
+        "predictions": str(predictions_path),
         "raw_metrics": raw_metrics,
         "best_by_accuracy": best,
         "active_policy": active_policy.to_dict(),
@@ -146,6 +151,56 @@ def main() -> int:
         },
     }
     best_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
+    return summary
+
+
+def tune_each_league(args: argparse.Namespace) -> dict[str, Any]:
+    models_root = Path(args.models_root)
+    prediction_paths = sorted(models_root.glob(f"*/{args.prediction_filename}"))
+    if not prediction_paths:
+        raise RuntimeError(f"No {args.prediction_filename} files found under {models_root}.")
+
+    completed = []
+    failures = []
+    for predictions_path in prediction_paths:
+        model_dir = predictions_path.parent
+        output_dir = model_dir / "draw_threshold_tuning"
+        try:
+            summary = tune_prediction_file(predictions_path, output_dir, args)
+            completed.append(
+                {
+                    "model_dir": str(model_dir),
+                    "predictions": str(predictions_path),
+                    "output_dir": str(output_dir),
+                    "raw_accuracy": summary["raw_metrics"]["raw_accuracy"],
+                    "policy_accuracy": summary["best_by_accuracy"]["policy_accuracy"],
+                    "draw_pick_recall": summary["best_by_accuracy"]["draw_pick_recall"],
+                    "active_policy": summary["outputs"]["active_policy"],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - keep batch tuning going across partial folders.
+            failures.append({"model_dir": str(model_dir), "predictions": str(predictions_path), "error": str(exc)})
+
+    batch_summary = {
+        "models_root": str(models_root),
+        "prediction_filename": args.prediction_filename,
+        "completed": completed,
+        "failures": failures,
+    }
+    batch_path = models_root / "draw_threshold_batch_summary.json"
+    batch_path.write_text(json.dumps(batch_summary, indent=2, default=str) + "\n")
+    print(json.dumps(batch_summary, indent=2, default=str))
+    return batch_summary
+
+
+def main() -> int:
+    args = parse_args()
+    if args.tune_each_league:
+        tune_each_league(args)
+        return 0
+    if not args.predictions:
+        raise SystemExit("--predictions is required unless --tune-each-league is set.")
+    summary = tune_prediction_file(Path(args.predictions), Path(args.output_dir), args)
     print(json.dumps(summary, indent=2, default=str))
     return 0
 
