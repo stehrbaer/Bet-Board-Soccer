@@ -31,6 +31,7 @@ def test_league_aliases_resolve_to_gold_partition_ids() -> None:
     assert module.normalize_league("EPL") == "eng.1"
     assert module.normalize_league("ger2") == "ger.2"
     assert module.normalize_league("eredivisie") == "ned.1"
+    assert module.normalize_league("uclqual") == "uefa.champions.qual"
 
 
 def test_league_all_resolves_to_no_competition_filter() -> None:

@@ -34,6 +34,7 @@ def test_default_history_partitions_include_country_depth() -> None:
 
     assert module.default_history_partitions_for_competition("eng.1", "2025") == "eng.1:2025,eng.2:2025,eng.3:2025"
     assert module.default_history_partitions_for_competition("aut.1", "2025") == "aut.1:2025"
+    assert module.default_history_partitions_for_competition("uefa.champions_qual", "2026") == "uefa.champions.qual:2026"
 
 
 def test_build_future_feature_frame_preserves_game_week() -> None:

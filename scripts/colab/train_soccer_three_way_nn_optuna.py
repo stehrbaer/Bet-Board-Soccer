@@ -89,6 +89,12 @@ LEAGUE_ALIASES = {
     "sco1": "sco.1",
     "sco_1": "sco.1",
     "scotland": "sco.1",
+    "uclqual": "uefa.champions.qual",
+    "ucl_qual": "uefa.champions.qual",
+    "championsqual": "uefa.champions.qual",
+    "champions_qual": "uefa.champions.qual",
+    "championsleaguequal": "uefa.champions.qual",
+    "uefa_champions_qual": "uefa.champions.qual",
 }
 
 CORE_LEAGUES = ["eng.1", "eng.2", "esp.1", "ger.1", "ita.1", "fra.1"]

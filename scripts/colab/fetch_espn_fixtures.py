@@ -77,6 +77,12 @@ LEAGUE_ALIASES = {
     "usa1": "usa.1",
     "usa_1": "usa.1",
     "mls": "usa.1",
+    "uclqual": "uefa.champions_qual",
+    "ucl_qual": "uefa.champions_qual",
+    "championsqual": "uefa.champions_qual",
+    "champions_qual": "uefa.champions_qual",
+    "championsleaguequal": "uefa.champions_qual",
+    "uefa_champions_qual": "uefa.champions_qual",
 }
 
 FULL_SCOPE_LEAGUES = [

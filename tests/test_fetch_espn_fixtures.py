@@ -36,6 +36,12 @@ def test_resolve_leagues_accepts_comma_list_aliases() -> None:
     assert module.resolve_leagues("epl,bundesliga2,eredivisie") == ["eng.1", "ger.2", "ned.1"]
 
 
+def test_resolve_leagues_accepts_champions_league_qualifier_alias() -> None:
+    module = load_script_module()
+
+    assert module.resolve_leagues("uclqual") == ["uefa.champions_qual"]
+
+
 def test_league_slug_matches_training_folder_style() -> None:
     module = load_script_module()
 

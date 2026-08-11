@@ -40,6 +40,11 @@ COUNTRY_HISTORY_COMPETITIONS = {
     "ger": ["ger.1", "ger.2"],
     "ita": ["ita.1", "ita.2"],
 }
+GOLD_COMPETITION_ALIASES = {
+    "uefa.champions_qual": "uefa.champions.qual",
+    "uefa.europa_qual": "uefa.europa.qual",
+    "uefa.europa_conf_qual": "uefa.europa.conf.qual",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,10 +101,11 @@ def competition_from_fixture_path(path: Path) -> str:
 
 
 def default_history_partitions_for_competition(competition_id: str, season: str) -> str:
-    country = competition_id.split(".", maxsplit=1)[0]
-    competitions = COUNTRY_HISTORY_COMPETITIONS.get(country, [competition_id])
-    if competition_id not in competitions:
-        competitions = [competition_id, *competitions]
+    gold_competition_id = GOLD_COMPETITION_ALIASES.get(competition_id, competition_id)
+    country = gold_competition_id.split(".", maxsplit=1)[0]
+    competitions = COUNTRY_HISTORY_COMPETITIONS.get(country, [gold_competition_id])
+    if gold_competition_id not in competitions:
+        competitions = [gold_competition_id, *competitions]
     return ",".join(f"{competition}:{season}" for competition in competitions)
 
 

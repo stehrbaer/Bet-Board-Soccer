@@ -335,6 +335,28 @@ outputs/fixtures/espn_by_league_2026/ger1_fixtures/ger.1_first_5_weeks_fixtures.
 
 ESPN may not expose every lower league consistently. Batch mode records unavailable league endpoints under `failures` in `batch_summary.json` and keeps the successful fixture pulls.
 
+Champions League qualifiers are available through ESPN as `uefa.champions_qual`; use the alias `uclqual`:
+
+```bash
+python scripts/colab/fetch_espn_fixtures.py \
+  --league uclqual \
+  --fetch-each-league \
+  --start-date 2026-08-10 \
+  --end-date 2026-09-30 \
+  --weeks 5 \
+  --output-dir outputs/fixtures/espn_uclqual_2026
+```
+
+Qualifier data is not part of the full-scope 2021-2025 league training batch. Score qualifier fixtures with the global model and use `--history-season 2026` because the gold qualifier partition currently exists as `uefa.champions.qual/season=2026`:
+
+```bash
+python scripts/colab/predict_future_fixtures.py \
+  --predict-each-league \
+  --fixtures-root outputs/fixtures/espn_uclqual_2026 \
+  --global-model-dir outputs/soccer_nn_global \
+  --history-season 2026
+```
+
 ## Future Fixture Predictions
 
 After `eng1` training finishes and future fixtures are fetched, score the first five EPL weeks:
