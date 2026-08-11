@@ -36,6 +36,33 @@ def test_default_history_partitions_include_country_depth() -> None:
     assert module.default_history_partitions_for_competition("aut.1", "2025") == "aut.1:2025"
 
 
+def test_build_future_feature_frame_preserves_game_week() -> None:
+    module = load_script_module()
+    fixtures = pd.DataFrame(
+        {
+            "kickoff_utc": ["2026-08-14T18:00:00Z"],
+            "week_start": ["2026-08-10"],
+            "game_week": [2],
+            "matchweek": [2],
+            "relative_week": [1],
+            "matchup_number": [1],
+            "competition_id": ["ger.2"],
+            "season": [2026],
+            "espn_event_id": ["401"],
+            "home_team_id": [100],
+            "away_team_id": [200],
+            "home_team_name": ["Home Club"],
+            "away_team_name": ["Away Club"],
+        }
+    )
+
+    future, _ = module.build_future_feature_frame(fixtures, [], {})
+
+    assert future.loc[0, "game_week"] == 2
+    assert future.loc[0, "relative_week"] == 1
+    assert future.loc[0, "matchup_key"] == "2_home_club_away_club"
+
+
 def test_predict_each_league_writes_batch_summary(tmp_path: Path, monkeypatch) -> None:
     module = load_script_module()
     fixtures_dir = tmp_path / "fixtures" / "eng1_fixtures"

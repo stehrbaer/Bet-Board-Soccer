@@ -303,6 +303,15 @@ python scripts/colab/fetch_espn_fixtures.py \
 
 This writes raw ESPN JSON plus normalized fixture CSVs. These fixtures still need prematch features before the neural model can score them.
 
+Fixture CSVs include both:
+
+```text
+game_week      # derived season game week using a lookback scan before start-date
+relative_week  # week number within the fetched output window
+```
+
+For example, if you fetch from `2026-08-10` and Bundesliga 2 is already in week 2, `game_week` stays `2` while `relative_week` is `1` for the first returned week. Increase `--game-week-lookback-days` if a league starts earlier than the default 60-day lookback.
+
 To pull future fixtures for every full-scope league into league-specific folders:
 
 ```bash

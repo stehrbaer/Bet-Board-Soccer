@@ -105,6 +105,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", required=True, help="Start date, YYYY-MM-DD.")
     parser.add_argument("--end-date", default="", help="End date, YYYY-MM-DD. Defaults to start + 60 days.")
     parser.add_argument("--weeks", type=int, default=5, help="Keep the first N fixture weeks in normalized output.")
+    parser.add_argument(
+        "--game-week-lookback-days",
+        type=int,
+        default=60,
+        help="Days before start-date to scan for deriving actual season game_week values.",
+    )
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--output-dir", default="outputs/fixtures/espn_eng1_2026")
     parser.add_argument(
@@ -163,6 +169,19 @@ def fetch_scoreboard(league: str, start_date: str, end_date: str, limit: int) ->
     return response.json()
 
 
+def merge_payload_events(*payloads: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {"events": []}
+    seen = set()
+    for payload in payloads:
+        for event in payload.get("events", []):
+            event_id = event.get("id")
+            if event_id in seen:
+                continue
+            seen.add(event_id)
+            merged["events"].append(event)
+    return merged
+
+
 def competitor_fields(competition: dict[str, Any], home_away: str) -> dict[str, Any]:
     for competitor in competition.get("competitors", []):
         if competitor.get("homeAway") == home_away:
@@ -194,6 +213,7 @@ def normalize_events(payload: dict[str, Any], league: str) -> pd.DataFrame:
             "espn_event_id": event.get("id"),
             "competition_id": league,
             "season": event.get("season", {}).get("year"),
+            "season_slug": event.get("season", {}).get("slug"),
             "kickoff_utc": event.get("date"),
             "name": event.get("name"),
             "short_name": event.get("shortName"),
@@ -219,21 +239,41 @@ def first_fixture_weeks(df: pd.DataFrame, weeks: int) -> pd.DataFrame:
         return df
     out = df.copy()
     out["week_start"] = (out["kickoff_utc"] - pd.to_timedelta(out["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
-    week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
-    out["matchweek"] = out["week_start"].map(week_numbers)
+    if "game_week" not in out.columns:
+        week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
+        out["game_week"] = out["week_start"].map(week_numbers)
+    else:
+        out["game_week"] = out["game_week"].fillna(out["week_start"].map({week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}))
+    out["matchweek"] = out["game_week"]
+    relative_week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
+    out["relative_week"] = out["week_start"].map(relative_week_numbers)
     out["matchup_number"] = out.groupby("week_start").cumcount() + 1
     out["matchup_key"] = [
-        f"{matchweek}_{slug(home)}_{slug(away)}"
-        for matchweek, home, away in zip(out["matchweek"], out["home_team_name"], out["away_team_name"])
+        f"{game_week}_{slug(home)}_{slug(away)}"
+        for game_week, home, away in zip(out["game_week"], out["home_team_name"], out["away_team_name"])
     ]
     keep_weeks = out["week_start"].drop_duplicates().head(weeks).tolist()
     return out[out["week_start"].isin(keep_weeks)].copy()
 
 
+def add_derived_game_week(fixtures: pd.DataFrame, requested_start_date: str) -> pd.DataFrame:
+    if fixtures.empty:
+        return fixtures
+    out = fixtures.copy()
+    out["week_start"] = (out["kickoff_utc"] - pd.to_timedelta(out["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
+    week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
+    out["game_week"] = out["week_start"].map(week_numbers)
+    out["relative_week"] = out["week_start"].map(week_numbers)
+    requested_start = pd.Timestamp(requested_start_date, tz="UTC")
+    return out[out["kickoff_utc"] >= requested_start].copy()
+
+
 def display_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "week_start",
+        "game_week",
         "matchweek",
+        "relative_week",
         "matchup_number",
         "matchup_key",
         "kickoff_utc",
@@ -255,11 +295,14 @@ def fetch_league(args: argparse.Namespace, league: str, output_dir: Path, end_da
     start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = fetch_scoreboard(league, args.start_date, end_date, args.limit)
+    lookback_start = (start - timedelta(days=args.game_week_lookback_days)).strftime("%Y-%m-%d")
+    requested_payload = fetch_scoreboard(league, args.start_date, end_date, args.limit)
+    week_index_payload = fetch_scoreboard(league, lookback_start, end_date, args.limit)
+    payload = merge_payload_events(requested_payload, week_index_payload)
     raw_path = output_dir / f"espn_{league}_{espn_date(args.start_date)}_{espn_date(end_date)}_raw.json"
     raw_path.write_text(json.dumps(payload, indent=2) + "\n")
 
-    fixtures = normalize_events(payload, league)
+    fixtures = add_derived_game_week(normalize_events(payload, league), args.start_date)
     first_weeks = first_fixture_weeks(fixtures, args.weeks)
     fixtures_path = output_dir / f"{league}_fixtures.csv"
     first_weeks_path = output_dir / f"{league}_first_{args.weeks}_weeks_fixtures.csv"
@@ -270,6 +313,8 @@ def fetch_league(args: argparse.Namespace, league: str, output_dir: Path, end_da
         "league": league,
         "start_date": args.start_date,
         "end_date": end_date,
+        "game_week_lookback_start": lookback_start,
+        "game_week_lookback_days": args.game_week_lookback_days,
         "events": len(fixtures),
         "first_weeks_events": len(first_weeks),
         "raw_json": str(raw_path),

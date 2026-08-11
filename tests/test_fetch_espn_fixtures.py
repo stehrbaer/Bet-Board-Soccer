@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pandas as pd
+
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "colab" / "fetch_espn_fixtures.py"
 
@@ -39,3 +41,21 @@ def test_league_slug_matches_training_folder_style() -> None:
 
     assert module.league_slug("eng.1") == "eng1"
     assert module.league_slug("fra.2") == "fra2"
+
+
+def test_add_derived_game_week_uses_lookback_weeks_then_filters_start() -> None:
+    module = load_script_module()
+    fixtures = pd.DataFrame(
+        {
+            "kickoff_utc": pd.to_datetime(
+                ["2026-07-31T18:00:00Z", "2026-08-07T18:00:00Z", "2026-08-14T18:00:00Z"],
+                utc=True,
+            ),
+            "espn_event_id": ["1", "2", "3"],
+        }
+    )
+
+    out = module.add_derived_game_week(fixtures, "2026-08-10")
+
+    assert out["espn_event_id"].tolist() == ["3"]
+    assert out["game_week"].tolist() == [3]
