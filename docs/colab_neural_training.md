@@ -335,6 +335,8 @@ outputs/fixtures/espn_by_league_2026/ger1_fixtures/ger.1_first_5_weeks_fixtures.
 
 ESPN may not expose every lower league consistently. Batch mode records unavailable league endpoints under `failures` in `batch_summary.json` and keeps the successful fixture pulls.
 
+By default, fixture exports skip ESPN-completed matches before choosing the first `--weeks` fixture weeks. That keeps daily prediction runs pointed at the next open games instead of re-predicting matches that have already finished. Add `--include-completed-fixtures` only when you intentionally want the old full-schedule export behavior for debugging or backfills.
+
 Champions League qualifiers are available through ESPN as `uefa.champions_qual`; use the alias `uclqual`:
 
 ```bash

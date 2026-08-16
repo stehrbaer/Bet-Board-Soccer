@@ -112,6 +112,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", default="", help="End date, YYYY-MM-DD. Defaults to start + 60 days.")
     parser.add_argument("--weeks", type=int, default=5, help="Keep the first N fixture weeks in normalized output.")
     parser.add_argument(
+        "--include-completed-fixtures",
+        action="store_true",
+        help="Keep completed ESPN fixtures in first-weeks output. By default only pending/live fixtures are exported.",
+    )
+    parser.add_argument(
         "--game-week-lookback-days",
         type=int,
         default=60,
@@ -225,6 +230,7 @@ def normalize_events(payload: dict[str, Any], league: str) -> pd.DataFrame:
             "short_name": event.get("shortName"),
             "status": status.get("description"),
             "status_state": status.get("state"),
+            "status_completed": bool(status.get("completed")),
             "venue_id": venue.get("id"),
             "venue_name": venue.get("fullName"),
             "venue_city": venue.get("address", {}).get("city"),
@@ -240,10 +246,14 @@ def normalize_events(payload: dict[str, Any], league: str) -> pd.DataFrame:
     return df.dropna(subset=["kickoff_utc"]).sort_values(["kickoff_utc", "espn_event_id"]).reset_index(drop=True)
 
 
-def first_fixture_weeks(df: pd.DataFrame, weeks: int) -> pd.DataFrame:
+def first_fixture_weeks(df: pd.DataFrame, weeks: int, include_completed: bool = False) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
+    if not include_completed and "status_completed" in out.columns:
+        out = out[~out["status_completed"].fillna(False).astype(bool)].copy()
+        if out.empty:
+            return out
     out["week_start"] = (out["kickoff_utc"] - pd.to_timedelta(out["kickoff_utc"].dt.weekday, unit="D")).dt.date.astype(str)
     if "game_week" not in out.columns:
         week_numbers = {week: idx for idx, week in enumerate(out["week_start"].drop_duplicates(), start=1)}
@@ -293,6 +303,8 @@ def display_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
         "venue_name",
         "venue_city",
         "status",
+        "status_state",
+        "status_completed",
     ]
     return df[[column for column in columns if column in df.columns]].copy()
 
@@ -309,7 +321,7 @@ def fetch_league(args: argparse.Namespace, league: str, output_dir: Path, end_da
     raw_path.write_text(json.dumps(payload, indent=2) + "\n")
 
     fixtures = add_derived_game_week(normalize_events(payload, league), args.start_date)
-    first_weeks = first_fixture_weeks(fixtures, args.weeks)
+    first_weeks = first_fixture_weeks(fixtures, args.weeks, include_completed=args.include_completed_fixtures)
     fixtures_path = output_dir / f"{league}_fixtures.csv"
     first_weeks_path = output_dir / f"{league}_first_{args.weeks}_weeks_fixtures.csv"
     fixtures.to_csv(fixtures_path, index=False)
@@ -323,6 +335,12 @@ def fetch_league(args: argparse.Namespace, league: str, output_dir: Path, end_da
         "game_week_lookback_days": args.game_week_lookback_days,
         "events": len(fixtures),
         "first_weeks_events": len(first_weeks),
+        "completed_events_excluded_from_first_weeks": (
+            int(fixtures["status_completed"].fillna(False).sum())
+            if "status_completed" in fixtures.columns and not args.include_completed_fixtures
+            else 0
+        ),
+        "include_completed_fixtures": args.include_completed_fixtures,
         "raw_json": str(raw_path),
         "fixtures_csv": str(fixtures_path),
         "first_weeks_csv": str(first_weeks_path),
