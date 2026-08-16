@@ -438,6 +438,35 @@ outputs/soccer_nn_global/future_2026/ger1/future_predictions.csv
 outputs/soccer_nn_global/future_prediction_batch_summary.json
 ```
 
+## Evaluate Completed Fixtures
+
+After some predicted fixtures have finished, grade them against ESPN final scores:
+
+```bash
+python scripts/colab/evaluate_future_predictions.py \
+  --batch-summary outputs/soccer_nn_by_league/future_prediction_batch_summary.json \
+  --repo-root . \
+  --output-dir outputs/soccer_nn_by_league/future_2026_evaluation
+```
+
+To grade one combined prediction CSV instead:
+
+```bash
+python scripts/colab/evaluate_future_predictions.py \
+  --predictions outputs/soccer_nn_by_league/all_available_next_5_games_predictions.csv \
+  --output-dir outputs/soccer_nn_by_league/future_2026_evaluation
+```
+
+This writes:
+
+```text
+graded_predictions.csv
+league_summary.csv
+summary.json
+```
+
+Only ESPN-completed fixtures are included in accuracy, log loss, Brier score, and draw-pick metrics. Pending or unmatched rows remain in `graded_predictions.csv` with empty actual-result fields.
+
 ## Explanation Graph
 
 Build a matchup-filterable graph for future predictions:
