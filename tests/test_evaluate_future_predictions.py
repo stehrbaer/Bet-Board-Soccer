@@ -84,7 +84,7 @@ def test_evaluate_predictions_scores_raw_and_recommended_picks() -> None:
         }
     )
 
-    scored, summary, by_league = module.evaluate_predictions(predictions, actuals)
+    scored, summary, by_league, by_result_type = module.evaluate_predictions(predictions, actuals)
 
     assert len(scored) == 3
     assert summary["completed_rows"] == 2
@@ -93,7 +93,18 @@ def test_evaluate_predictions_scores_raw_and_recommended_picks() -> None:
     assert summary["recommended_accuracy"] == 0.5
     assert summary["recommended_accuracy_delta"] == -0.5
     assert summary["actual_draw_count"] == 1
+    assert summary["actual_home_win_count"] == 1
+    assert summary["actual_away_win_home_loss_count"] == 0
+    assert summary["raw_home_win_accuracy"] == 1.0
+    assert summary["raw_draw_accuracy"] == 1.0
+    assert summary["recommended_home_win_accuracy"] == 1.0
+    assert summary["recommended_draw_accuracy"] == 0.0
     assert by_league.loc[0, "competition_id"] == "eng.1"
+    assert by_league.loc[0, "recommended_draw_accuracy"] == 0.0
+    draw_row = by_result_type[by_result_type["actual_result_type"].eq("draw")].iloc[0]
+    assert draw_row["completed_rows"] == 1
+    assert draw_row["raw_accuracy"] == 1.0
+    assert draw_row["recommended_accuracy"] == 0.0
 
 
 def test_evaluate_predictions_falls_back_to_team_and_kickoff_matching() -> None:
@@ -129,7 +140,7 @@ def test_evaluate_predictions_falls_back_to_team_and_kickoff_matching() -> None:
         }
     )
 
-    scored, summary, _ = module.evaluate_predictions(predictions, actuals)
+    scored, summary, _, _ = module.evaluate_predictions(predictions, actuals)
 
     assert scored.loc[0, "match_id"] == "740596"
     assert summary["completed_rows"] == 1

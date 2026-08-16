@@ -464,10 +464,11 @@ This writes:
 ```text
 graded_predictions.csv
 league_summary.csv
+result_type_breakdown.csv
 summary.json
 ```
 
-Only ESPN-completed fixtures are included in accuracy, log loss, Brier score, and draw-pick metrics. Pending or unmatched rows remain in `graded_predictions.csv` with empty actual-result fields.
+Only ESPN-completed fixtures are included in accuracy, log loss, Brier score, and draw-pick metrics. Pending or unmatched rows remain in `graded_predictions.csv` with empty actual-result fields. `league_summary.csv` includes per-league accuracy for actual home wins, draws, and away wins/home losses; `result_type_breakdown.csv` provides the same split in a long format that is easier to chart.
 
 ## Explanation Graph
 

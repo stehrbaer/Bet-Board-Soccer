@@ -267,14 +267,31 @@ def metric_summary(scored: pd.DataFrame, total_rows: int, pending_rows: int) -> 
     draw_picks = recommended_pick.eq("draw") if len(completed) else pd.Series(dtype=bool)
     actual_draws = completed["actual_label"].eq("draw") if len(completed) else pd.Series(dtype=bool)
     draw_hits = draw_picks & actual_draws if len(completed) else pd.Series(dtype=bool)
+    actual_home_wins = completed["actual_label"].eq("home") if len(completed) else pd.Series(dtype=bool)
+    actual_away_wins = completed["actual_label"].eq("away") if len(completed) else pd.Series(dtype=bool)
 
     return {
         "rows": int(total_rows),
         "completed_rows": int(len(completed)),
         "pending_or_unmatched_rows": int(pending_rows),
+        "actual_home_win_count": int(actual_home_wins.sum()),
+        "actual_draw_count": int(actual_draws.sum()),
+        "actual_away_win_home_loss_count": int(actual_away_wins.sum()),
         "actual_draw_rate": safe_rate(int(actual_draws.sum()), len(completed)),
         "raw_accuracy": safe_rate(int(raw_correct.sum()), len(completed)),
         "recommended_accuracy": safe_rate(int(recommended_correct.sum()), len(completed)),
+        "raw_home_win_accuracy": safe_rate(int((raw_correct & actual_home_wins).sum()), int(actual_home_wins.sum())),
+        "raw_draw_accuracy": safe_rate(int((raw_correct & actual_draws).sum()), int(actual_draws.sum())),
+        "raw_away_win_home_loss_accuracy": safe_rate(int((raw_correct & actual_away_wins).sum()), int(actual_away_wins.sum())),
+        "recommended_home_win_accuracy": safe_rate(
+            int((recommended_correct & actual_home_wins).sum()), int(actual_home_wins.sum())
+        ),
+        "recommended_draw_accuracy": safe_rate(
+            int((recommended_correct & actual_draws).sum()), int(actual_draws.sum())
+        ),
+        "recommended_away_win_home_loss_accuracy": safe_rate(
+            int((recommended_correct & actual_away_wins).sum()), int(actual_away_wins.sum())
+        ),
         "recommended_accuracy_delta": (
             None
             if len(completed) == 0
@@ -291,7 +308,6 @@ def metric_summary(scored: pd.DataFrame, total_rows: int, pending_rows: int) -> 
         "draw_pick_precision": safe_rate(int(draw_hits.sum()), int(draw_picks.sum())),
         "draw_pick_recall": safe_rate(int(draw_hits.sum()), int(actual_draws.sum())),
         "draw_pick_count": int(draw_picks.sum()),
-        "actual_draw_count": int(actual_draws.sum()),
     }
 
 
@@ -308,7 +324,47 @@ def league_summary(scored: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)[columns].sort_values(["completed_rows", "competition_id"], ascending=[False, True])
 
 
-def evaluate_predictions(predictions: pd.DataFrame, actuals: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
+def result_type_breakdown(scored: pd.DataFrame) -> pd.DataFrame:
+    completed = scored[scored["actual_completed"] & scored["actual_label"].notna()].copy()
+    if completed.empty:
+        return pd.DataFrame(
+            columns=[
+                "competition_id",
+                "actual_result_type",
+                "completed_rows",
+                "raw_correct",
+                "raw_accuracy",
+                "recommended_correct",
+                "recommended_accuracy",
+            ]
+        )
+
+    rows = []
+    result_names = {
+        "home": "home_win",
+        "draw": "draw",
+        "away": "away_win_home_loss",
+    }
+    for competition_id, league_group in completed.groupby("competition_id"):
+        for label in LABELS:
+            group = league_group[league_group["actual_label"].eq(label)]
+            raw_correct = int(group["raw_correct"].fillna(False).sum())
+            recommended_correct = int(group["recommended_correct"].fillna(False).sum())
+            rows.append(
+                {
+                    "competition_id": competition_id,
+                    "actual_result_type": result_names[label],
+                    "completed_rows": int(len(group)),
+                    "raw_correct": raw_correct,
+                    "raw_accuracy": safe_rate(raw_correct, len(group)),
+                    "recommended_correct": recommended_correct,
+                    "recommended_accuracy": safe_rate(recommended_correct, len(group)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def evaluate_predictions(predictions: pd.DataFrame, actuals: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame, pd.DataFrame]:
     scored = predictions.copy()
     if "competition_id" not in scored.columns and "league" in scored.columns:
         scored["competition_id"] = scored["league"]
@@ -360,7 +416,8 @@ def evaluate_predictions(predictions: pd.DataFrame, actuals: pd.DataFrame) -> tu
     pending = int((~completed_mask).sum())
     summary = metric_summary(scored, total_rows=len(scored), pending_rows=pending)
     by_league = league_summary(scored)
-    return scored, summary, by_league
+    by_result_type = result_type_breakdown(scored)
+    return scored, summary, by_league, by_result_type
 
 
 def main() -> int:
@@ -370,16 +427,18 @@ def main() -> int:
 
     predictions = load_predictions(args)
     actuals, fetch_failures = fetch_actuals(predictions, args.limit)
-    scored, summary, by_league = evaluate_predictions(predictions, actuals)
+    scored, summary, by_league, by_result_type = evaluate_predictions(predictions, actuals)
     summary["fetch_failures"] = fetch_failures
     summary["outputs"] = {
         "graded_predictions": str(output_dir / "graded_predictions.csv"),
         "league_summary": str(output_dir / "league_summary.csv"),
+        "result_type_breakdown": str(output_dir / "result_type_breakdown.csv"),
         "summary": str(output_dir / "summary.json"),
     }
 
     scored.to_csv(output_dir / "graded_predictions.csv", index=False)
     by_league.to_csv(output_dir / "league_summary.csv", index=False)
+    by_result_type.to_csv(output_dir / "result_type_breakdown.csv", index=False)
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str) + "\n")
     print(json.dumps(summary, indent=2, default=str))
     return 0
