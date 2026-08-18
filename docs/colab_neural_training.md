@@ -18,6 +18,15 @@ os.environ["DO_SPACES_ENDPOINT"] = "https://fra1.digitaloceanspaces.com"
 os.environ["DO_SPACES_REGION"] = "fra1"
 ```
 
+Set the dedicated Odds API key in Colab secrets or an environment variable:
+
+```python
+import os
+from google.colab import userdata
+
+os.environ["ODDS_API_KEY"] = userdata.get("ODDS_API_KEY")
+```
+
 Upload or copy this script into Colab:
 
 ```text
@@ -469,6 +478,74 @@ summary.json
 ```
 
 Only ESPN-completed fixtures are included in accuracy, log loss, Brier score, and draw-pick metrics. Pending or unmatched rows remain in `graded_predictions.csv` with empty actual-result fields. `league_summary.csv` includes per-league accuracy for actual home wins, draws, and away wins/home losses; `result_type_breakdown.csv` provides the same split in a long format that is easier to chart.
+
+## Future Odds And ROI
+
+Collect current 1X2 odds from The Odds API and join them to future predictions:
+
+```bash
+python scripts/colab/enrich_future_predictions_with_odds.py \
+  --predictions outputs/soccer_nn_by_league/all_available_next_5_games_predictions.csv \
+  --output-dir outputs/soccer_nn_by_league/future_2026_odds \
+  --leagues auto
+```
+
+This writes:
+
+```text
+future_1x2_odds.csv
+future_predictions_with_odds.csv
+odds_enrichment_summary.json
+```
+
+The enriched prediction rows include:
+
+```text
+home_odds
+draw_odds
+away_odds
+home_implied
+draw_implied
+away_implied
+consensus_home_odds
+consensus_draw_odds
+consensus_away_odds
+prediction_odds
+recommended_pick_odds
+prediction_decimal_odds
+recommended_pick_decimal_odds
+prediction_edge
+recommended_pick_edge
+```
+
+`home_odds`, `draw_odds`, and `away_odds` are the selected bookmaker prices based on the script's preference list. Consensus odds are retained separately.
+
+If the prediction file already includes final results from `evaluate_future_predictions.py`, the enrichment also writes 1-unit realized profit columns:
+
+```text
+prediction_profit_1u
+recommended_pick_profit_1u
+```
+
+## Historical Odds Backfill
+
+Backfill historical 1X2 odds from Football-Data.co.uk:
+
+```bash
+python scripts/colab/backfill_football_data_odds.py \
+  --leagues all \
+  --seasons 2021,2022,2023,2024,2025 \
+  --output-dir outputs/football_data_odds
+```
+
+This writes normalized partitions:
+
+```text
+outputs/football_data_odds/normalized/competition=eng.1/season=2025/part-000.parquet
+outputs/football_data_odds/normalized/football_data_1x2_odds.parquet
+```
+
+Football-Data seasons are start-year seasons, so `2025` means `2025-26`.
 
 ## Explanation Graph
 
