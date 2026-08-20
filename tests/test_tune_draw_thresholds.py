@@ -34,6 +34,8 @@ def tiny_args(tmp_path: Path) -> argparse.Namespace:
         min_balanced_draw_p="0.28",
         min_draw_pick_p="0.22",
         policy_version="draw_policy_test",
+        leagues="",
+        export_config_dir=str(tmp_path / "configs" / "draw_policies"),
     )
 
 
@@ -75,4 +77,23 @@ def test_tune_each_league_writes_batch_summary(tmp_path: Path) -> None:
     assert len(summary["completed"]) == 2
     assert not summary["failures"]
     assert (tmp_path / "eng1_soccer_nn" / "draw_threshold_tuning" / "active_draw_policy.json").exists()
+    assert (tmp_path / "configs" / "draw_policies" / "eng1_draw_policy.json").exists()
     assert (tmp_path / "draw_threshold_batch_summary.json").exists()
+
+
+def test_tune_each_league_can_filter_specific_leagues(tmp_path: Path) -> None:
+    module = load_script_module()
+    for league in ["aut1_soccer_nn", "ger2_soccer_nn", "por1_soccer_nn"]:
+        model_dir = tmp_path / league
+        model_dir.mkdir()
+        sample_predictions().to_parquet(model_dir / "test_predictions.parquet", index=False)
+    args = tiny_args(tmp_path)
+    args.tune_each_league = True
+    args.models_root = str(tmp_path)
+    args.leagues = "ger2,por1"
+
+    summary = module.tune_each_league(args)
+
+    assert [row["competition_id"] for row in summary["completed"]] == ["ger.2", "por.1"]
+    assert not (tmp_path / "aut1_soccer_nn" / "draw_threshold_tuning" / "active_draw_policy.json").exists()
+    assert (tmp_path / "configs" / "draw_policies" / "ger2_draw_policy.json").exists()

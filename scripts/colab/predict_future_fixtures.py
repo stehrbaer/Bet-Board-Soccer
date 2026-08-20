@@ -76,7 +76,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-league-draw-policy",
         action="store_true",
-        help="In batch mode, prefer each model folder's draw_threshold_tuning/active_draw_policy.json.",
+        help="Prefer per-league draw policies from the model folder or --draw-policy-root.",
+    )
+    parser.add_argument(
+        "--require-league-draw-policy",
+        action="store_true",
+        help="Fail when --use-league-draw-policy is set and a league-specific policy is missing.",
+    )
+    parser.add_argument(
+        "--draw-policy-root",
+        default="configs/draw_policies",
+        help="Folder containing mirrored per-league policies named <league_slug>_draw_policy.json.",
     )
     return parser.parse_args()
 
@@ -375,11 +385,26 @@ def model_dir_for_competition(args: argparse.Namespace, competition_id: str) -> 
     return Path(args.models_root) / f"{league_slug(competition_id)}_soccer_nn"
 
 
-def draw_policy_for_model_dir(model_dir: Path, fallback: str, use_league_draw_policy: bool) -> str:
+def draw_policy_for_model_dir(
+    model_dir: Path,
+    competition_id: str,
+    fallback: str,
+    use_league_draw_policy: bool,
+    require_league_draw_policy: bool = False,
+    draw_policy_root: str = "configs/draw_policies",
+) -> str:
     if use_league_draw_policy:
-        candidate = model_dir / "draw_threshold_tuning" / "active_draw_policy.json"
-        if candidate.exists():
-            return str(candidate)
+        candidates = [
+            model_dir / "draw_threshold_tuning" / "active_draw_policy.json",
+        ]
+        if draw_policy_root:
+            candidates.append(Path(draw_policy_root) / f"{league_slug(competition_id)}_draw_policy.json")
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        if require_league_draw_policy:
+            searched = ", ".join(str(path) for path in candidates)
+            raise FileNotFoundError(f"Missing league draw policy for {competition_id}. Searched: {searched}")
     return fallback
 
 
@@ -403,7 +428,14 @@ def predict_each_league(args: argparse.Namespace) -> dict[str, Any]:
                 raise FileNotFoundError(f"Missing preprocessing: {preprocessing_path}")
             output_dir = model_dir / "future_2026" / league_slug(competition_id) if args.global_model_dir else model_dir / "future_2026"
             history_partitions = default_history_partitions_for_competition(competition_id, args.history_season)
-            draw_policy_path = draw_policy_for_model_dir(model_dir, args.draw_policy, args.use_league_draw_policy)
+            draw_policy_path = draw_policy_for_model_dir(
+                model_dir=model_dir,
+                competition_id=competition_id,
+                fallback=args.draw_policy,
+                use_league_draw_policy=args.use_league_draw_policy,
+                require_league_draw_policy=getattr(args, "require_league_draw_policy", False),
+                draw_policy_root=getattr(args, "draw_policy_root", "configs/draw_policies"),
+            )
             summary = predict_fixture_file(
                 fixtures_path=fixtures_path,
                 model_path=model_path,
@@ -413,6 +445,7 @@ def predict_each_league(args: argparse.Namespace) -> dict[str, Any]:
                 history_partitions=history_partitions,
                 draw_policy_path=draw_policy_path,
             )
+            draw_policy = summary.get("draw_policy")
             completed.append(
                 {
                     "competition_id": competition_id,
@@ -421,6 +454,8 @@ def predict_each_league(args: argparse.Namespace) -> dict[str, Any]:
                     "output_dir": str(output_dir),
                     "fixtures_scored": summary["fixtures_scored"],
                     "future_predictions": summary["outputs"]["future_predictions"],
+                    "draw_policy_version": None if draw_policy is None else draw_policy["version"],
+                    "draw_policy_path": draw_policy_path,
                 }
             )
         except Exception as exc:  # noqa: BLE001 - keep batch prediction going across missing leagues.
@@ -431,6 +466,9 @@ def predict_each_league(args: argparse.Namespace) -> dict[str, Any]:
         "models_root": args.models_root,
         "global_model_dir": args.global_model_dir,
         "history_season": args.history_season,
+        "use_league_draw_policy": args.use_league_draw_policy,
+        "require_league_draw_policy": getattr(args, "require_league_draw_policy", False),
+        "draw_policy_root": getattr(args, "draw_policy_root", "configs/draw_policies"),
         "completed": completed,
         "failures": failures,
     }

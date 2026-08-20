@@ -95,6 +95,8 @@ def test_predict_each_league_writes_batch_summary(tmp_path: Path, monkeypatch) -
         gold_root="gold",
         draw_policy="",
         use_league_draw_policy=True,
+        require_league_draw_policy=False,
+        draw_policy_root=str(tmp_path / "configs" / "draw_policies"),
     )
 
     summary = module.predict_each_league(args)
@@ -103,3 +105,52 @@ def test_predict_each_league_writes_batch_summary(tmp_path: Path, monkeypatch) -
     assert summary["completed"][0]["competition_id"] == "eng.1"
     assert (tmp_path / "models" / "eng1_soccer_nn" / "future_2026" / "future_predictions.csv").exists()
     assert (tmp_path / "models" / "future_prediction_batch_summary.json").exists()
+
+
+def test_draw_policy_for_model_dir_uses_config_root(tmp_path: Path) -> None:
+    module = load_script_module()
+    model_dir = tmp_path / "models" / "aut1_soccer_nn"
+    policy_root = tmp_path / "configs" / "draw_policies"
+    policy_root.mkdir(parents=True)
+    policy_path = policy_root / "aut1_draw_policy.json"
+    policy_path.write_text("{}")
+
+    path = module.draw_policy_for_model_dir(
+        model_dir=model_dir,
+        competition_id="aut.1",
+        fallback="configs/draw_policy_eng1.json",
+        use_league_draw_policy=True,
+        draw_policy_root=str(policy_root),
+    )
+
+    assert path == str(policy_path)
+
+
+def test_predict_each_league_requires_missing_league_policy(tmp_path: Path, monkeypatch) -> None:
+    module = load_script_module()
+    fixtures_dir = tmp_path / "fixtures" / "aut1_fixtures"
+    fixtures_dir.mkdir(parents=True)
+    fixtures_path = fixtures_dir / "aut.1_first_5_weeks_fixtures.csv"
+    pd.DataFrame({"kickoff_utc": ["2026-08-15T12:00:00Z"]}).to_csv(fixtures_path, index=False)
+
+    model_dir = tmp_path / "models" / "aut1_soccer_nn"
+    model_dir.mkdir(parents=True)
+    (model_dir / "soccer_three_way_nn.keras").write_text("model")
+    (model_dir / "preprocessing.joblib").write_text("preprocessing")
+
+    args = argparse.Namespace(
+        fixtures_root=str(tmp_path / "fixtures"),
+        models_root=str(tmp_path / "models"),
+        global_model_dir="",
+        history_season="2025",
+        gold_root="gold",
+        draw_policy="configs/draw_policy_eng1.json",
+        use_league_draw_policy=True,
+        require_league_draw_policy=True,
+        draw_policy_root=str(tmp_path / "configs" / "draw_policies"),
+    )
+
+    summary = module.predict_each_league(args)
+
+    assert not summary["completed"]
+    assert "Missing league draw policy for aut.1" in summary["failures"][0]["error"]
