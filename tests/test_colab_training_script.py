@@ -118,6 +118,41 @@ def test_odds_matrix_detects_american_odds_and_converts_to_decimal() -> None:
     assert round(float(odds[0, 2]), 3) == 4.1
 
 
+def test_attach_historical_odds_joins_by_date_league_and_team_alias(tmp_path: Path) -> None:
+    module = load_script_module()
+    gold = pd.DataFrame(
+        {
+            "match_id": [1],
+            "competition_id": ["eng.1"],
+            "season": ["2025"],
+            "kickoff_utc": ["2025-08-16T16:30:00Z"],
+            "home_team_name": ["Wolverhampton Wanderers"],
+            "away_team_name": ["Manchester City"],
+            "result_target": [2],
+        }
+    )
+    odds = pd.DataFrame(
+        {
+            "competition_id": ["eng.1"],
+            "season": [2025],
+            "match_date": ["2025-08-16"],
+            "home_team_name": ["Wolves"],
+            "away_team_name": ["Man City"],
+            "home_odds_decimal": [8.0],
+            "draw_odds_decimal": [5.0],
+            "away_odds_decimal": [1.4],
+        }
+    )
+    odds_path = tmp_path / "odds.parquet"
+    odds.to_parquet(odds_path, index=False)
+
+    out, diagnostics = module.attach_historical_odds(gold, str(odds_path), tmp_path)
+
+    assert diagnostics["matched_rows"] == 1
+    assert out.loc[0, "draw_odds_decimal"] == 5.0
+    assert (tmp_path / "historical_odds_join.json").exists()
+
+
 def test_simulate_fixed_stake_roi_bets_only_positive_ev() -> None:
     module = load_script_module()
     probs = np.asarray(
@@ -214,6 +249,8 @@ def test_duckdb_loader_filters_partitions_and_keeps_numeric_columns(tmp_path: Pa
                 "kickoff_utc": [f"{season}-08-01T12:00:00Z"],
                 "home_team_id": [100 + match_id],
                 "away_team_id": [200 + match_id],
+                "home_team_name": [f"Home {match_id}"],
+                "away_team_name": [f"Away {match_id}"],
                 "result_target": [target],
                 "model_feature": [feature],
                 "text_blob": ["drop me"],
@@ -224,4 +261,5 @@ def test_duckdb_loader_filters_partitions_and_keeps_numeric_columns(tmp_path: Pa
 
     assert df["match_id"].tolist() == [2, 3]
     assert "model_feature" in df.columns
+    assert "home_team_name" in df.columns
     assert "text_blob" not in df.columns

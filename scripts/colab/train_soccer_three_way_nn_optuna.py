@@ -109,6 +109,42 @@ REQUIRED_MODEL_COLUMNS = [
     "away_team_id",
     "result_target",
 ]
+OPTIONAL_JOIN_COLUMNS = [
+    "home_team_name",
+    "away_team_name",
+]
+
+TEAM_KEY_ALIASES = {
+    "afc_bournemouth": "bournemouth",
+    "athletic_club": "ath_bilbao",
+    "athletic_bilbao": "ath_bilbao",
+    "atletico_madrid": "ath_madrid",
+    "brighton_and_hove_albion": "brighton",
+    "brighton_hove_albion": "brighton",
+    "catalonia": "barcelona",
+    "deportivo_alaves": "alaves",
+    "espanyol": "espanol",
+    "hertha_berlin": "hertha",
+    "internazionale": "inter",
+    "leeds_united": "leeds",
+    "leicester_city": "leicester",
+    "manchester_city": "man_city",
+    "manchester_united": "man_united",
+    "newcastle_united": "newcastle",
+    "nottingham_forest": "nottm_forest",
+    "nott_m_forest": "nottm_forest",
+    "nottm_forest": "nottm_forest",
+    "queens_park_rangers": "qpr",
+    "real_betis": "betis",
+    "real_sociedad": "sociedad",
+    "sheffield_united": "sheffield_utd",
+    "sporting_cp": "sporting",
+    "stade_rennais": "rennes",
+    "tottenham_hotspur": "tottenham",
+    "west_bromwich_albion": "west_brom",
+    "west_ham_united": "west_ham",
+    "wolverhampton_wanderers": "wolves",
+}
 
 
 try:
@@ -242,6 +278,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use DuckDB to scan/filter parquet before loading into pandas. Recommended for global models.",
     )
+    parser.add_argument(
+        "--historical-odds",
+        default="",
+        help=(
+            "Optional Football-Data 1X2 odds parquet/CSV, or output dir containing "
+            "normalized/football_data_1x2_odds.parquet. Joined for ROI objective diagnostics."
+        ),
+    )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
 
@@ -284,6 +328,18 @@ def normalize_league(value: str) -> str:
 
 def league_slug(competition_id: str) -> str:
     return competition_id.lower().replace(".", "").replace("_", "").replace("-", "")
+
+
+def text_slug(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def team_key(value: object) -> str:
+    raw = text_slug(value)
+    return TEAM_KEY_ALIASES.get(raw, raw)
 
 
 def resolve_competitions(args: argparse.Namespace) -> list[str]:
@@ -546,7 +602,8 @@ def load_gold_dataset_duckdb(root: str, competitions: list[str], seasons: list[s
         for name, type_name in schema
         if duckdb_type_is_numeric(type_name) and name not in REQUIRED_MODEL_COLUMNS
     ]
-    keep_columns = list(dict.fromkeys(REQUIRED_MODEL_COLUMNS + numeric_columns))
+    optional_columns = [column for column in OPTIONAL_JOIN_COLUMNS if column in schema_map]
+    keep_columns = list(dict.fromkeys(REQUIRED_MODEL_COLUMNS + optional_columns + numeric_columns))
     select_exprs = []
     for column in keep_columns:
         ident = sql_identifier(column)
@@ -745,6 +802,139 @@ def load_gold_dataset(root: str, competitions: list[str], seasons: list[str], ou
             },
         )
     return df
+
+
+def resolve_historical_odds_path(value: str) -> str:
+    path = Path(value)
+    if value.startswith("s3://"):
+        return value
+    if path.is_dir():
+        candidate = path / "normalized" / "football_data_1x2_odds.parquet"
+        if candidate.exists():
+            return str(candidate)
+        candidate = path / "football_data_1x2_odds.parquet"
+        if candidate.exists():
+            return str(candidate)
+    return value
+
+
+def read_table_path(path: str) -> pd.DataFrame:
+    path = resolve_historical_odds_path(path)
+    if path.startswith("s3://"):
+        filesystem = s3_filesystem()
+        with filesystem.open(s3_key(path), "rb") as handle:
+            if path.endswith(".csv"):
+                return pd.read_csv(handle)
+            return pd.read_parquet(handle)
+    if path.endswith(".csv"):
+        return pd.read_csv(path)
+    return pd.read_parquet(path)
+
+
+def add_odds_join_keys(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["competition_id"] = out["competition_id"].astype(str)
+    out["season"] = out["season"].astype(str)
+    out["match_date"] = pd.to_datetime(out["kickoff_utc"], errors="coerce", utc=True).dt.date.astype(str)
+    out["home_team_key"] = out["home_team_name"].map(team_key)
+    out["away_team_key"] = out["away_team_name"].map(team_key)
+    return out
+
+
+def normalize_historical_odds(odds: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "competition_id",
+        "season",
+        "match_date",
+        "home_team_name",
+        "away_team_name",
+        "home_odds_decimal",
+        "draw_odds_decimal",
+        "away_odds_decimal",
+    }
+    missing = sorted(required - set(odds.columns))
+    if missing:
+        raise RuntimeError(f"Historical odds file is missing required columns: {missing}")
+    out = odds.copy()
+    out["competition_id"] = out["competition_id"].astype(str)
+    out["season"] = out["season"].astype(str)
+    out["match_date"] = pd.to_datetime(out["match_date"], errors="coerce").dt.date.astype(str)
+    if "home_team_key" not in out.columns:
+        out["home_team_key"] = out["home_team_name"].map(team_key)
+    else:
+        out["home_team_key"] = out["home_team_key"].map(team_key)
+    if "away_team_key" not in out.columns:
+        out["away_team_key"] = out["away_team_name"].map(team_key)
+    else:
+        out["away_team_key"] = out["away_team_key"].map(team_key)
+    for column in ["home_odds_decimal", "draw_odds_decimal", "away_odds_decimal"]:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    keep = [
+        "competition_id",
+        "season",
+        "match_date",
+        "home_team_key",
+        "away_team_key",
+        "home_odds_decimal",
+        "draw_odds_decimal",
+        "away_odds_decimal",
+    ]
+    out = out.dropna(subset=["competition_id", "season", "match_date", "home_team_key", "away_team_key"])
+    out = out.drop_duplicates(subset=keep[:5], keep="first")
+    return out[keep]
+
+
+def attach_historical_odds(df: pd.DataFrame, odds_path: str, output_dir: Path | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if not odds_path:
+        return df, {"enabled": False}
+    missing = [column for column in ["kickoff_utc", "competition_id", "season", "home_team_name", "away_team_name"] if column not in df.columns]
+    if missing:
+        raise RuntimeError(f"Cannot join historical odds; model input is missing columns: {missing}")
+
+    resolved_path = resolve_historical_odds_path(odds_path)
+    odds = normalize_historical_odds(read_table_path(resolved_path))
+    left = add_odds_join_keys(df)
+    original_columns = set(left.columns)
+    joined = left.merge(
+        odds,
+        on=["competition_id", "season", "match_date", "home_team_key", "away_team_key"],
+        how="left",
+        suffixes=("", "_historical"),
+    )
+    odds_cols = ["home_odds_decimal", "draw_odds_decimal", "away_odds_decimal"]
+    valid = joined[odds_cols].notna().all(axis=1) & (joined[odds_cols] > 1.0).all(axis=1)
+    diagnostics = {
+        "enabled": True,
+        "source": resolved_path,
+        "input_rows": int(len(df)),
+        "odds_rows": int(len(odds)),
+        "matched_rows": int(valid.sum()),
+        "match_rate": float(valid.mean()) if len(joined) else 0.0,
+        "unmatched_rows": int((~valid).sum()),
+    }
+    LOGGER.info(
+        "historical odds join complete matched_rows=%s input_rows=%s match_rate=%.3f source=%s",
+        diagnostics["matched_rows"],
+        diagnostics["input_rows"],
+        diagnostics["match_rate"],
+        resolved_path,
+    )
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_json(output_dir / "historical_odds_join.json", diagnostics)
+        unmatched_cols = [
+            "competition_id",
+            "season",
+            "match_date",
+            "home_team_name",
+            "away_team_name",
+            "home_team_key",
+            "away_team_key",
+        ]
+        joined.loc[~valid, unmatched_cols].head(200).to_csv(output_dir / "historical_odds_unmatched_sample.csv", index=False)
+
+    helper_columns = {"match_date", "home_team_key", "away_team_key"} - original_columns
+    return joined.drop(columns=sorted(helper_columns), errors="ignore"), diagnostics
 
 
 def require_tensorflow():
@@ -955,12 +1145,6 @@ def dataset_profile(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
         "test_date_min": test_df["kickoff_utc"].min(),
         "test_date_max": test_df["kickoff_utc"].max(),
     }
-
-
-def text_slug(value: object) -> str:
-    text = str(value or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    return text.strip("_")
 
 
 def ranked_label(row: pd.Series) -> str:
@@ -1323,6 +1507,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "smoke": args.smoke,
             "next_games": args.next_games,
             "duckdb_preprocess": args.duckdb_preprocess,
+            "historical_odds": args.historical_odds,
             "log_file": str(log_path),
         },
     )
@@ -1336,6 +1521,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         if args.duckdb_preprocess
         else load_gold_dataset(args.input, competitions, seasons, output_dir)
     )
+    df, historical_odds_join = attach_historical_odds(df, args.historical_odds, output_dir)
     write_json(output_dir / "load_complete.json", {"rows": len(df), "columns": len(df.columns)})
     LOGGER.info("building train/test split")
     train_all = df[df["season"].astype(str) <= str(args.train_through_season)].copy()
@@ -1435,6 +1621,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
     summary = {
         "config": asdict(config),
         "load_engine": load_engine,
+        "historical_odds_join": historical_odds_join,
         "fold_settings": {
             **fold_settings,
             "effective": {
