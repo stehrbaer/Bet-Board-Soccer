@@ -7,6 +7,7 @@ import sys
 import types
 
 import pandas as pd
+import numpy as np
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "colab" / "train_soccer_three_way_nn_optuna.py"
@@ -96,6 +97,70 @@ def test_resolve_fold_settings_keeps_large_league_defaults() -> None:
 
     assert (n_folds, val_size, min_train_size) == (4, 200, 600)
     assert metadata["adjusted"] is False
+
+
+def test_odds_matrix_detects_american_odds_and_converts_to_decimal() -> None:
+    module = load_script_module()
+    df = pd.DataFrame(
+        {
+            "home_odds": [-120],
+            "draw_odds": [260],
+            "away_odds": [310],
+        }
+    )
+
+    odds, mask, source = module.odds_matrix_with_mask(df)
+
+    assert source == "home_odds,draw_odds,away_odds:american_to_decimal"
+    assert mask.tolist() == [True]
+    assert round(float(odds[0, 0]), 3) == 1.833
+    assert round(float(odds[0, 1]), 3) == 3.6
+    assert round(float(odds[0, 2]), 3) == 4.1
+
+
+def test_simulate_fixed_stake_roi_bets_only_positive_ev() -> None:
+    module = load_script_module()
+    probs = np.asarray(
+        [
+            [0.60, 0.20, 0.20],
+            [0.20, 0.50, 0.30],
+        ]
+    )
+    actual = np.asarray([0, 2])
+    odds = np.asarray(
+        [
+            [2.0, 3.0, 4.0],
+            [1.5, 1.8, 2.0],
+        ]
+    )
+
+    metrics = module.simulate_fixed_stake_roi(probs, actual, odds, min_ev=0.03)
+
+    assert metrics["roi_bets"] == 1
+    assert metrics["roi_profit"] == 1.0
+    assert metrics["roi"] == 1.0
+
+
+def test_recency_weights_emphasize_newer_folds() -> None:
+    module = load_script_module()
+
+    weights = module.recency_weights_from_timestamps([100.0, 200.0, 300.0], gamma=1.6)
+
+    assert round(float(weights.sum()), 6) == 1.0
+    assert weights[2] > weights[1] > weights[0]
+
+
+def test_objective_score_combines_probability_quality_and_roi() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(objective_logloss_weight=0.65, objective_brier_weight=0.25, objective_roi_weight=0.10)
+
+    score = module.objective_score(
+        {"log_loss": 1.0, "multiclass_brier": 0.5},
+        {"roi": 0.2},
+        args,
+    )
+
+    assert round(score, 3) == -0.755
 
 
 def test_export_next_games_predictions_writes_compact_csv(tmp_path: Path) -> None:

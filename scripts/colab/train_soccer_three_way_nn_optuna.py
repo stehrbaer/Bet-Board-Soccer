@@ -182,6 +182,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--objective-logloss-weight",
+        type=float,
+        default=0.65,
+        help="Optuna objective weight for negative multiclass log loss.",
+    )
+    parser.add_argument(
+        "--objective-brier-weight",
+        type=float,
+        default=0.25,
+        help="Optuna objective weight for negative multiclass Brier score.",
+    )
+    parser.add_argument(
+        "--objective-roi-weight",
+        type=float,
+        default=0.10,
+        help="Optuna objective weight for validation fixed-stake ROI when 1X2 odds are available.",
+    )
+    parser.add_argument(
+        "--min-ev",
+        type=float,
+        default=0.03,
+        help="Minimum expected value for ROI simulation bets, computed as model_prob * decimal_odds - 1.",
+    )
+    parser.add_argument(
+        "--recency-gamma",
+        type=float,
+        default=1.6,
+        help="Fold recency weighting. 1.0 weights folds equally; values above 1 emphasize newer validation folds.",
+    )
+    parser.add_argument(
         "--train-each-league",
         action="store_true",
         help="Train one separate model per selected league and write each under output-dir/<league_slug>_soccer_nn.",
@@ -758,6 +788,11 @@ def multiclass_brier(y_true_onehot: np.ndarray, p_pred: np.ndarray) -> float:
     return float(np.mean(np.sum((p_pred - y_true_onehot) ** 2, axis=1)))
 
 
+def normalized_probabilities(p_pred: np.ndarray) -> np.ndarray:
+    p_pred = np.clip(np.asarray(p_pred, dtype=float), 1e-15, 1 - 1e-15)
+    return p_pred / p_pred.sum(axis=1, keepdims=True)
+
+
 def class_brier_scores(y_true_cls: np.ndarray, p_pred: np.ndarray) -> dict[str, float]:
     out = {}
     for cls, label in TARGET_LABELS.items():
@@ -766,8 +801,7 @@ def class_brier_scores(y_true_cls: np.ndarray, p_pred: np.ndarray) -> dict[str, 
 
 
 def evaluate_probs(y_true_onehot: np.ndarray, p_pred: np.ndarray) -> dict[str, float]:
-    p_pred = np.clip(p_pred, 1e-15, 1 - 1e-15)
-    p_pred = p_pred / p_pred.sum(axis=1, keepdims=True)
+    p_pred = normalized_probabilities(p_pred)
     y_true_cls = np.argmax(y_true_onehot, axis=1)
     y_pred_cls = np.argmax(p_pred, axis=1)
     metrics = {
@@ -783,6 +817,127 @@ def evaluate_probs(y_true_onehot: np.ndarray, p_pred: np.ndarray) -> dict[str, f
     }
     metrics.update(class_brier_scores(y_true_cls, p_pred))
     return metrics
+
+
+ODDS_COLUMN_CANDIDATES = [
+    ("home_odds_decimal", "draw_odds_decimal", "away_odds_decimal"),
+    ("consensus_home_odds", "consensus_draw_odds", "consensus_away_odds"),
+    ("home_odds", "draw_odds", "away_odds"),
+    ("b365_home_decimal", "b365_draw_decimal", "b365_away_decimal"),
+    ("avg_home_decimal", "avg_draw_decimal", "avg_away_decimal"),
+    ("max_home_decimal", "max_draw_decimal", "max_away_decimal"),
+    ("B365H", "B365D", "B365A"),
+    ("AvgH", "AvgD", "AvgA"),
+    ("MaxH", "MaxD", "MaxA"),
+]
+
+
+def american_to_decimal(value: object) -> float:
+    odds = pd.to_numeric(value, errors="coerce")
+    if pd.isna(odds) or float(odds) == 0.0:
+        return float("nan")
+    odds = float(odds)
+    if odds > 0:
+        return 1.0 + odds / 100.0
+    return 1.0 + 100.0 / abs(odds)
+
+
+def odds_triplet_columns(df: pd.DataFrame) -> tuple[str, str, str] | None:
+    for columns in ODDS_COLUMN_CANDIDATES:
+        if all(column in df.columns for column in columns):
+            return columns
+    return None
+
+
+def odds_matrix_with_mask(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, str]:
+    columns = odds_triplet_columns(df)
+    if columns is None:
+        return np.empty((len(df), 3), dtype=float), np.zeros(len(df), dtype=bool), ""
+    odds = df[list(columns)].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    source = ",".join(columns)
+    if columns == ("home_odds", "draw_odds", "away_odds") or columns == (
+        "consensus_home_odds",
+        "consensus_draw_odds",
+        "consensus_away_odds",
+    ):
+        odds = np.vectorize(american_to_decimal, otypes=[float])(odds)
+        source = f"{source}:american_to_decimal"
+    valid_mask = np.isfinite(odds).all(axis=1) & (odds > 1.0).all(axis=1)
+    return odds, valid_mask, source
+
+
+def simulate_fixed_stake_roi(
+    p_pred: np.ndarray,
+    y_true_cls: np.ndarray,
+    odds_1x2: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+    stake: float = 1.0,
+    min_ev: float = 0.03,
+) -> dict[str, float | int]:
+    p_pred = normalized_probabilities(p_pred)
+    y_true_cls = np.asarray(y_true_cls, dtype=int)
+    odds_1x2 = np.asarray(odds_1x2, dtype=float)
+    if valid_mask is None:
+        valid_mask = np.isfinite(odds_1x2).all(axis=1) & (odds_1x2 > 1.0).all(axis=1)
+    valid_mask = np.asarray(valid_mask, dtype=bool)
+
+    total_profit = 0.0
+    n_bets = 0
+    chosen_classes = []
+    for idx in np.flatnonzero(valid_mask):
+        ev = p_pred[idx] * odds_1x2[idx] - 1.0
+        if not np.isfinite(ev).all():
+            continue
+        chosen = int(np.argmax(ev))
+        if ev[chosen] <= min_ev:
+            continue
+        chosen_classes.append(chosen)
+        n_bets += 1
+        if y_true_cls[idx] == chosen:
+            total_profit += stake * (float(odds_1x2[idx, chosen]) - 1.0)
+        else:
+            total_profit -= stake
+
+    total_staked = n_bets * stake
+    return {
+        "roi_profit": float(total_profit),
+        "roi_bets": int(n_bets),
+        "roi": float(total_profit / total_staked) if total_staked > 0 else 0.0,
+        "roi_draw_bet_share": float(np.mean(np.asarray(chosen_classes) == 1)) if chosen_classes else 0.0,
+        "roi_rows_with_odds": int(valid_mask.sum()),
+    }
+
+
+def fold_median_timestamp(df: pd.DataFrame, val_idx: np.ndarray) -> float:
+    dt = pd.to_datetime(df.iloc[val_idx]["kickoff_utc"], errors="coerce", utc=True).dropna()
+    if dt.empty:
+        return float("nan")
+    return float(dt.median().timestamp())
+
+
+def recency_weights_from_timestamps(timestamps: list[float], gamma: float = 1.6) -> np.ndarray:
+    if not timestamps:
+        return np.asarray([], dtype=float)
+    if gamma <= 0:
+        raise ValueError("--recency-gamma must be greater than 0.")
+    t = np.asarray(timestamps, dtype=float)
+    if not np.isfinite(t).all():
+        weights = np.asarray([gamma**idx for idx in range(len(timestamps))], dtype=float)
+        return weights / weights.sum()
+    t = t - np.min(t)
+    t_max = float(np.max(t))
+    if t_max <= 0 or gamma == 1.0:
+        return np.ones(len(timestamps), dtype=float) / len(timestamps)
+    weights = np.exp(np.log(gamma) * (t / t_max))
+    return weights / weights.sum()
+
+
+def objective_score(metrics: dict[str, float], roi_metrics: dict[str, float | int], args: argparse.Namespace) -> float:
+    return float(
+        args.objective_logloss_weight * (-metrics["log_loss"])
+        + args.objective_brier_weight * (-metrics["multiclass_brier"])
+        + args.objective_roi_weight * float(roi_metrics["roi"])
+    )
 
 
 def dataset_profile(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str]) -> dict[str, Any]:
@@ -955,6 +1110,7 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
         np.random.seed(args.seed)
         params = trial_params(trial)
         scores = []
+        fold_times = []
         for fold_idx, (train_idx, val_idx) in enumerate(folds):
             train_df = df.iloc[train_idx]
             val_df = df.iloc[val_idx]
@@ -981,20 +1137,53 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             )
             probs = model.predict(fold.x_val, verbose=0)
             metrics = evaluate_probs(fold.y_val, probs)
+            y_val_cls = np.argmax(fold.y_val, axis=1)
+            odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+            roi_metrics = simulate_fixed_stake_roi(
+                p_pred=probs,
+                y_true_cls=y_val_cls,
+                odds_1x2=odds,
+                valid_mask=valid_odds_mask,
+                min_ev=args.min_ev,
+            )
+            fold_score = objective_score(metrics, roi_metrics, args)
             LOGGER.info(
-                "trial %s fold %s metrics log_loss=%.5f accuracy=%.4f brier=%.5f",
+                "trial %s fold %s metrics log_loss=%.5f accuracy=%.4f brier=%.5f roi=%.4f bets=%s score=%.5f",
                 trial.number,
                 fold_idx + 1,
                 metrics["log_loss"],
                 metrics["accuracy"],
                 metrics["multiclass_brier"],
+                roi_metrics["roi"],
+                roi_metrics["roi_bets"],
+                fold_score,
             )
-            trial.set_user_attr(f"fold_{fold_idx}", metrics)
-            scores.append(-metrics["log_loss"])
-            trial.report(float(np.mean(scores)), step=fold_idx)
+            fold_diag = {
+                **metrics,
+                **roi_metrics,
+                "odds_source": odds_source,
+                "objective_score": fold_score,
+                "mean_pred": [
+                    metrics["mean_prob_home"],
+                    metrics["mean_prob_draw"],
+                    metrics["mean_prob_away"],
+                ],
+                "actual_freq": [
+                    metrics["actual_home_rate"],
+                    metrics["actual_draw_rate"],
+                    metrics["actual_away_rate"],
+                ],
+            }
+            trial.set_user_attr(f"fold_{fold_idx}", fold_diag)
+            scores.append(fold_score)
+            fold_times.append(fold_median_timestamp(df, val_idx))
+            running_weights = recency_weights_from_timestamps(fold_times, gamma=args.recency_gamma)
+            trial.report(float(np.sum(running_weights * np.asarray(scores, dtype=float))), step=fold_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
-        return float(np.mean(scores))
+        weights = recency_weights_from_timestamps(fold_times, gamma=args.recency_gamma)
+        trial.set_user_attr("fold_recency_weights", weights.tolist())
+        return float(np.sum(weights * np.asarray(scores, dtype=float)))
 
     return objective
 
@@ -1016,11 +1205,27 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
     )
     probs = model.predict(fold.x_val, verbose=0)
     metrics = evaluate_probs(fold.y_val, probs)
+    odds, valid_odds_mask, odds_source = odds_matrix_with_mask(test_df)
+    y_test_cls = np.argmax(fold.y_val, axis=1)
+    metrics.update(
+        {
+            **simulate_fixed_stake_roi(
+                p_pred=probs,
+                y_true_cls=y_test_cls,
+                odds_1x2=odds,
+                valid_mask=valid_odds_mask,
+                min_ev=args.min_ev,
+            ),
+            "odds_source": odds_source,
+        }
+    )
     LOGGER.info(
-        "final test metrics log_loss=%.5f accuracy=%.4f brier=%.5f",
+        "final test metrics log_loss=%.5f accuracy=%.4f brier=%.5f roi=%.4f bets=%s",
         metrics["log_loss"],
         metrics["accuracy"],
         metrics["multiclass_brier"],
+        metrics["roi"],
+        metrics["roi_bets"],
     )
     prediction_columns = [
         "match_id",
@@ -1108,6 +1313,13 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "n_trials": args.n_trials,
             "patience": args.patience,
             "seed": args.seed,
+            "objective": {
+                "logloss_weight": args.objective_logloss_weight,
+                "brier_weight": args.objective_brier_weight,
+                "roi_weight": args.objective_roi_weight,
+                "min_ev": args.min_ev,
+                "recency_gamma": args.recency_gamma,
+            },
             "smoke": args.smoke,
             "next_games": args.next_games,
             "duckdb_preprocess": args.duckdb_preprocess,
@@ -1234,6 +1446,14 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         "best_value": study.best_value,
         "best_params": study.best_params,
         "best_trial_attrs": study.best_trial.user_attrs,
+        "objective": {
+            "formula": "logloss_weight*(-log_loss) + brier_weight*(-multiclass_brier) + roi_weight*roi",
+            "logloss_weight": args.objective_logloss_weight,
+            "brier_weight": args.objective_brier_weight,
+            "roi_weight": args.objective_roi_weight,
+            "min_ev": args.min_ev,
+            "recency_gamma": args.recency_gamma,
+        },
         "test_metrics": test_metrics,
         "artifacts": {
             "model": str(model_path),
