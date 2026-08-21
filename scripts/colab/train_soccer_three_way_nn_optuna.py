@@ -191,6 +191,18 @@ class TrainingConfig:
     seed: int
 
 
+@dataclass
+class CachedObjectiveFold:
+    fold_index: int
+    train_rows: int
+    val_rows: int
+    prepared: Any
+    odds: np.ndarray
+    valid_odds_mask: np.ndarray
+    odds_source: str
+    median_timestamp: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Optuna-tuned neural soccer 1X2 model.")
     parser.add_argument("--input", required=True, help="Gold dataset root or local parquet file.")
@@ -285,6 +297,12 @@ def parse_args() -> argparse.Namespace:
             "Optional Football-Data 1X2 odds parquet/CSV, or output dir containing "
             "normalized/football_data_1x2_odds.parquet. Joined for ROI objective diagnostics."
         ),
+    )
+    parser.add_argument(
+        "--cache-fold-preprocessing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache imputed/scaled walk-forward folds once per run instead of rebuilding them every Optuna trial.",
     )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
@@ -884,15 +902,34 @@ def normalize_historical_odds(odds: pd.DataFrame) -> pd.DataFrame:
     return out[keep]
 
 
-def attach_historical_odds(df: pd.DataFrame, odds_path: str, output_dir: Path | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
-    if not odds_path:
+def load_historical_odds_source(odds_path: str) -> tuple[pd.DataFrame, str]:
+    resolved_path = resolve_historical_odds_path(odds_path)
+    return normalize_historical_odds(read_table_path(resolved_path)), resolved_path
+
+
+def attach_historical_odds(
+    df: pd.DataFrame,
+    odds_path: str,
+    output_dir: Path | None = None,
+    odds_frame: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if not odds_path and odds_frame is None:
         return df, {"enabled": False}
     missing = [column for column in ["kickoff_utc", "competition_id", "season", "home_team_name", "away_team_name"] if column not in df.columns]
     if missing:
         raise RuntimeError(f"Cannot join historical odds; model input is missing columns: {missing}")
 
-    resolved_path = resolve_historical_odds_path(odds_path)
-    odds = normalize_historical_odds(read_table_path(resolved_path))
+    if odds_frame is None:
+        odds, resolved_path = load_historical_odds_source(odds_path)
+    else:
+        odds = odds_frame
+        resolved_path = resolve_historical_odds_path(odds_path) if odds_path else "preloaded"
+    competitions = set(df["competition_id"].astype(str).unique())
+    seasons = set(df["season"].astype(str).unique())
+    odds = odds[
+        odds["competition_id"].astype(str).isin(competitions)
+        & odds["season"].astype(str).isin(seasons)
+    ].copy()
     left = add_odds_join_keys(df)
     original_columns = set(left.columns)
     joined = left.merge(
@@ -1284,8 +1321,44 @@ def trial_params(trial: optuna.Trial) -> dict[str, Any]:
     }
 
 
+def build_objective_fold_cache(
+    df: pd.DataFrame,
+    folds,
+    feature_cols: list[str],
+    enabled: bool,
+) -> list[CachedObjectiveFold] | None:
+    if not enabled:
+        return None
+    started = time.monotonic()
+    cache = []
+    for fold_idx, (train_idx, val_idx) in enumerate(folds):
+        train_df = df.iloc[train_idx]
+        val_df = df.iloc[val_idx]
+        odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+        cache.append(
+            CachedObjectiveFold(
+                fold_index=fold_idx,
+                train_rows=len(train_df),
+                val_rows=len(val_df),
+                prepared=prepare_fold(train_df, val_df, feature_cols),
+                odds=odds,
+                valid_odds_mask=valid_odds_mask,
+                odds_source=odds_source,
+                median_timestamp=fold_median_timestamp(df, val_idx),
+            )
+        )
+    LOGGER.info("cached walk-forward fold preprocessing folds=%s elapsed_seconds=%.1f", len(cache), time.monotonic() - started)
+    return cache
+
+
 def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack, args: argparse.Namespace):
     tf, *_, EarlyStopping = tf_pack
+    fold_cache = build_objective_fold_cache(
+        df=df,
+        folds=folds,
+        feature_cols=feature_cols,
+        enabled=getattr(args, "cache_fold_preprocessing", True),
+    )
 
     def objective(trial: optuna.Trial) -> float:
         LOGGER.info("trial %s started", trial.number)
@@ -1295,10 +1368,26 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
         params = trial_params(trial)
         scores = []
         fold_times = []
-        for fold_idx, (train_idx, val_idx) in enumerate(folds):
-            train_df = df.iloc[train_idx]
-            val_df = df.iloc[val_idx]
-            fold = prepare_fold(train_df, val_df, feature_cols)
+        fold_iter = fold_cache if fold_cache is not None else list(enumerate(folds))
+        for item in fold_iter:
+            if fold_cache is not None:
+                fold_idx = item.fold_index
+                fold = item.prepared
+                train_rows = item.train_rows
+                val_rows = item.val_rows
+                odds = item.odds
+                valid_odds_mask = item.valid_odds_mask
+                odds_source = item.odds_source
+                median_timestamp = item.median_timestamp
+            else:
+                fold_idx, (train_idx, val_idx) = item
+                train_df = df.iloc[train_idx]
+                val_df = df.iloc[val_idx]
+                fold = prepare_fold(train_df, val_df, feature_cols)
+                train_rows = len(train_df)
+                val_rows = len(val_df)
+                odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+                median_timestamp = fold_median_timestamp(df, val_idx)
             model = build_model(tf_pack, fold.x_train.shape[1], params)
             early = EarlyStopping(monitor="val_loss", patience=args.patience, restore_best_weights=True)
             LOGGER.info(
@@ -1306,8 +1395,8 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
                 trial.number,
                 fold_idx + 1,
                 len(folds),
-                len(train_df),
-                len(val_df),
+                train_rows,
+                val_rows,
                 params["batch_size"],
             )
             model.fit(
@@ -1322,7 +1411,6 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             probs = model.predict(fold.x_val, verbose=0)
             metrics = evaluate_probs(fold.y_val, probs)
             y_val_cls = np.argmax(fold.y_val, axis=1)
-            odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
             roi_metrics = simulate_fixed_stake_roi(
                 p_pred=probs,
                 y_true_cls=y_val_cls,
@@ -1360,7 +1448,7 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             }
             trial.set_user_attr(f"fold_{fold_idx}", fold_diag)
             scores.append(fold_score)
-            fold_times.append(fold_median_timestamp(df, val_idx))
+            fold_times.append(median_timestamp)
             running_weights = recency_weights_from_timestamps(fold_times, gamma=args.recency_gamma)
             trial.report(float(np.sum(running_weights * np.asarray(scores, dtype=float))), step=fold_idx)
             if trial.should_prune():
@@ -1521,7 +1609,12 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         if args.duckdb_preprocess
         else load_gold_dataset(args.input, competitions, seasons, output_dir)
     )
-    df, historical_odds_join = attach_historical_odds(df, args.historical_odds, output_dir)
+    df, historical_odds_join = attach_historical_odds(
+        df,
+        args.historical_odds,
+        output_dir,
+        odds_frame=getattr(args, "_historical_odds_frame", None),
+    )
     write_json(output_dir / "load_complete.json", {"rows": len(df), "columns": len(df.columns)})
     LOGGER.info("building train/test split")
     train_all = df[df["season"].astype(str) <= str(args.train_through_season)].copy()
@@ -1687,8 +1780,20 @@ def run_each_league(args: argparse.Namespace) -> int:
     LOGGER.info("batch league training plan competitions=%s seasons=%s output_dir=%s", competitions, seasons, base_output_dir)
     summaries = []
     failures = []
+    historical_odds_frame = None
+    if args.historical_odds:
+        started = time.monotonic()
+        historical_odds_frame, historical_odds_source = load_historical_odds_source(args.historical_odds)
+        LOGGER.info(
+            "preloaded historical odds rows=%s source=%s elapsed_seconds=%.1f",
+            len(historical_odds_frame),
+            historical_odds_source,
+            time.monotonic() - started,
+        )
     for idx, competition in enumerate(competitions):
         league_args = argparse.Namespace(**vars(args))
+        if historical_odds_frame is not None:
+            league_args._historical_odds_frame = historical_odds_frame
         league_args.league = competition
         league_args.competitions = competition
         league_args.seasons = ",".join(seasons)
