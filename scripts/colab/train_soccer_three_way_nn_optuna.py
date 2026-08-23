@@ -245,7 +245,16 @@ def parse_args() -> argparse.Namespace:
         "--objective-roi-weight",
         type=float,
         default=0.10,
-        help="Optuna objective weight for validation fixed-stake ROI when 1X2 odds are available.",
+        help="Optuna objective weight for validation fixed-stake ROI when --roi-mode uses objective ROI.",
+    )
+    parser.add_argument(
+        "--roi-mode",
+        default="posttrain",
+        choices=["off", "posttrain", "objective", "both"],
+        help=(
+            "How to use historical 1X2 odds. posttrain evaluates ROI only after training; "
+            "objective also uses ROI inside Optuna and is slower."
+        ),
     )
     parser.add_argument(
         "--min-ev",
@@ -301,8 +310,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cache-fold-preprocessing",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Cache imputed/scaled walk-forward folds once per run instead of rebuilding them every Optuna trial.",
+        default=False,
+        help="Cache imputed/scaled walk-forward folds once per run. Faster per trial but slower startup and higher memory.",
     )
     parser.add_argument("--smoke", action="store_true", help="Override settings for a fast local/Colab smoke run.")
     return parser.parse_args()
@@ -974,6 +983,14 @@ def attach_historical_odds(
     return joined.drop(columns=sorted(helper_columns), errors="ignore"), diagnostics
 
 
+def roi_in_objective(args: argparse.Namespace) -> bool:
+    return bool(args.historical_odds) and args.roi_mode in {"objective", "both"} and args.objective_roi_weight != 0
+
+
+def roi_after_training(args: argparse.Namespace) -> bool:
+    return bool(args.historical_odds) and args.roi_mode in {"posttrain", "both"}
+
+
 def require_tensorflow():
     try:
         import tensorflow as tf
@@ -1135,6 +1152,16 @@ def simulate_fixed_stake_roi(
     }
 
 
+def empty_roi_metrics() -> dict[str, float | int]:
+    return {
+        "roi_profit": 0.0,
+        "roi_bets": 0,
+        "roi": 0.0,
+        "roi_draw_bet_share": 0.0,
+        "roi_rows_with_odds": 0,
+    }
+
+
 def fold_median_timestamp(df: pd.DataFrame, val_idx: np.ndarray) -> float:
     dt = pd.to_datetime(df.iloc[val_idx]["kickoff_utc"], errors="coerce", utc=True).dropna()
     if dt.empty:
@@ -1160,10 +1187,11 @@ def recency_weights_from_timestamps(timestamps: list[float], gamma: float = 1.6)
 
 
 def objective_score(metrics: dict[str, float], roi_metrics: dict[str, float | int], args: argparse.Namespace) -> float:
+    roi_weight = args.objective_roi_weight if roi_in_objective(args) else 0.0
     return float(
         args.objective_logloss_weight * (-metrics["log_loss"])
         + args.objective_brier_weight * (-metrics["multiclass_brier"])
-        + args.objective_roi_weight * float(roi_metrics["roi"])
+        + roi_weight * float(roi_metrics["roi"])
     )
 
 
@@ -1326,6 +1354,7 @@ def build_objective_fold_cache(
     folds,
     feature_cols: list[str],
     enabled: bool,
+    include_roi: bool,
 ) -> list[CachedObjectiveFold] | None:
     if not enabled:
         return None
@@ -1334,7 +1363,12 @@ def build_objective_fold_cache(
     for fold_idx, (train_idx, val_idx) in enumerate(folds):
         train_df = df.iloc[train_idx]
         val_df = df.iloc[val_idx]
-        odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+        if include_roi:
+            odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+        else:
+            odds = np.empty((len(val_df), 3), dtype=float)
+            valid_odds_mask = np.zeros(len(val_df), dtype=bool)
+            odds_source = ""
         cache.append(
             CachedObjectiveFold(
                 fold_index=fold_idx,
@@ -1358,6 +1392,7 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
         folds=folds,
         feature_cols=feature_cols,
         enabled=getattr(args, "cache_fold_preprocessing", True),
+        include_roi=roi_in_objective(args),
     )
 
     def objective(trial: optuna.Trial) -> float:
@@ -1386,7 +1421,12 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
                 fold = prepare_fold(train_df, val_df, feature_cols)
                 train_rows = len(train_df)
                 val_rows = len(val_df)
-                odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+                if roi_in_objective(args):
+                    odds, valid_odds_mask, odds_source = odds_matrix_with_mask(val_df)
+                else:
+                    odds = np.empty((len(val_df), 3), dtype=float)
+                    valid_odds_mask = np.zeros(len(val_df), dtype=bool)
+                    odds_source = ""
                 median_timestamp = fold_median_timestamp(df, val_idx)
             model = build_model(tf_pack, fold.x_train.shape[1], params)
             early = EarlyStopping(monitor="val_loss", patience=args.patience, restore_best_weights=True)
@@ -1411,12 +1451,16 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
             probs = model.predict(fold.x_val, verbose=0)
             metrics = evaluate_probs(fold.y_val, probs)
             y_val_cls = np.argmax(fold.y_val, axis=1)
-            roi_metrics = simulate_fixed_stake_roi(
-                p_pred=probs,
-                y_true_cls=y_val_cls,
-                odds_1x2=odds,
-                valid_mask=valid_odds_mask,
-                min_ev=args.min_ev,
+            roi_metrics = (
+                simulate_fixed_stake_roi(
+                    p_pred=probs,
+                    y_true_cls=y_val_cls,
+                    odds_1x2=odds,
+                    valid_mask=valid_odds_mask,
+                    min_ev=args.min_ev,
+                )
+                if roi_in_objective(args)
+                else empty_roi_metrics()
             )
             fold_score = objective_score(metrics, roi_metrics, args)
             LOGGER.info(
@@ -1460,7 +1504,16 @@ def objective_factory(df: pd.DataFrame, folds, feature_cols: list[str], tf_pack,
     return objective
 
 
-def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str], params, tf_pack, args):
+def train_final_model(
+    df: pd.DataFrame,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_cols: list[str],
+    params,
+    tf_pack,
+    args,
+    output_dir: Path | None = None,
+):
     _, *_, EarlyStopping = tf_pack
     LOGGER.info("final training started train_rows=%s test_rows=%s features=%s", len(train_df), len(test_df), len(feature_cols))
     fold = prepare_fold(train_df, test_df, feature_cols)
@@ -1477,20 +1530,29 @@ def train_final_model(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.Data
     )
     probs = model.predict(fold.x_val, verbose=0)
     metrics = evaluate_probs(fold.y_val, probs)
-    odds, valid_odds_mask, odds_source = odds_matrix_with_mask(test_df)
     y_test_cls = np.argmax(fold.y_val, axis=1)
-    metrics.update(
-        {
-            **simulate_fixed_stake_roi(
-                p_pred=probs,
-                y_true_cls=y_test_cls,
-                odds_1x2=odds,
-                valid_mask=valid_odds_mask,
-                min_ev=args.min_ev,
-            ),
-            "odds_source": odds_source,
-        }
+    test_eval_df = test_df
+    historical_odds_join = {"enabled": False}
+    if roi_after_training(args):
+        test_eval_df, historical_odds_join = attach_historical_odds(
+            test_df,
+            args.historical_odds,
+            output_dir,
+            odds_frame=getattr(args, "_historical_odds_frame", None),
+        )
+    odds, valid_odds_mask, odds_source = odds_matrix_with_mask(test_eval_df)
+    roi_metrics = (
+        simulate_fixed_stake_roi(
+            p_pred=probs,
+            y_true_cls=y_test_cls,
+            odds_1x2=odds,
+            valid_mask=valid_odds_mask,
+            min_ev=args.min_ev,
+        )
+        if roi_after_training(args)
+        else empty_roi_metrics()
     )
+    metrics.update({**roi_metrics, "odds_source": odds_source, "historical_odds_join": historical_odds_join})
     LOGGER.info(
         "final test metrics log_loss=%.5f accuracy=%.4f brier=%.5f roi=%.4f bets=%s",
         metrics["log_loss"],
@@ -1589,6 +1651,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
                 "logloss_weight": args.objective_logloss_weight,
                 "brier_weight": args.objective_brier_weight,
                 "roi_weight": args.objective_roi_weight,
+                "roi_mode": args.roi_mode,
                 "min_ev": args.min_ev,
                 "recency_gamma": args.recency_gamma,
             },
@@ -1596,6 +1659,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "next_games": args.next_games,
             "duckdb_preprocess": args.duckdb_preprocess,
             "historical_odds": args.historical_odds,
+            "cache_fold_preprocessing": args.cache_fold_preprocessing,
             "log_file": str(log_path),
         },
     )
@@ -1609,12 +1673,15 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         if args.duckdb_preprocess
         else load_gold_dataset(args.input, competitions, seasons, output_dir)
     )
-    df, historical_odds_join = attach_historical_odds(
-        df,
-        args.historical_odds,
-        output_dir,
-        odds_frame=getattr(args, "_historical_odds_frame", None),
-    )
+    if roi_in_objective(args):
+        df, historical_odds_join = attach_historical_odds(
+            df,
+            args.historical_odds,
+            output_dir,
+            odds_frame=getattr(args, "_historical_odds_frame", None),
+        )
+    else:
+        historical_odds_join = {"enabled": False, "mode": args.roi_mode}
     write_json(output_dir / "load_complete.json", {"rows": len(df), "columns": len(df.columns)})
     LOGGER.info("building train/test split")
     train_all = df[df["season"].astype(str) <= str(args.train_through_season)].copy()
@@ -1681,6 +1748,7 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
         params=study.best_params,
         tf_pack=tf_pack,
         args=args,
+        output_dir=output_dir,
     )
 
     model_path = output_dir / "soccer_three_way_nn.keras"
@@ -1730,7 +1798,9 @@ def run_training(args: argparse.Namespace, competitions: list[str], seasons: lis
             "formula": "logloss_weight*(-log_loss) + brier_weight*(-multiclass_brier) + roi_weight*roi",
             "logloss_weight": args.objective_logloss_weight,
             "brier_weight": args.objective_brier_weight,
-            "roi_weight": args.objective_roi_weight,
+            "roi_weight": args.objective_roi_weight if roi_in_objective(args) else 0.0,
+            "configured_roi_weight": args.objective_roi_weight,
+            "roi_mode": args.roi_mode,
             "min_ev": args.min_ev,
             "recency_gamma": args.recency_gamma,
         },

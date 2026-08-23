@@ -27,6 +27,12 @@ LEAKAGE_PATTERNS = [
     "final",
     "home_goals",
     "away_goals",
+    "odds",
+    "moneyline",
+    "implied_prob",
+    "market",
+    "b365",
+    "bookmaker",
 ]
 
 IDENTIFIER_COLUMNS = {

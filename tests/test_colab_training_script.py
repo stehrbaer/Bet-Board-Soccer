@@ -187,7 +187,13 @@ def test_recency_weights_emphasize_newer_folds() -> None:
 
 def test_objective_score_combines_probability_quality_and_roi() -> None:
     module = load_script_module()
-    args = argparse.Namespace(objective_logloss_weight=0.65, objective_brier_weight=0.25, objective_roi_weight=0.10)
+    args = argparse.Namespace(
+        objective_logloss_weight=0.65,
+        objective_brier_weight=0.25,
+        objective_roi_weight=0.10,
+        historical_odds="odds.parquet",
+        roi_mode="objective",
+    )
 
     score = module.objective_score(
         {"log_loss": 1.0, "multiclass_brier": 0.5},
@@ -196,6 +202,25 @@ def test_objective_score_combines_probability_quality_and_roi() -> None:
     )
 
     assert round(score, 3) == -0.755
+
+
+def test_objective_score_ignores_roi_in_posttrain_mode() -> None:
+    module = load_script_module()
+    args = argparse.Namespace(
+        objective_logloss_weight=0.65,
+        objective_brier_weight=0.25,
+        objective_roi_weight=0.10,
+        historical_odds="odds.parquet",
+        roi_mode="posttrain",
+    )
+
+    score = module.objective_score(
+        {"log_loss": 1.0, "multiclass_brier": 0.5},
+        {"roi": 0.2},
+        args,
+    )
+
+    assert round(score, 3) == -0.775
 
 
 def test_export_next_games_predictions_writes_compact_csv(tmp_path: Path) -> None:

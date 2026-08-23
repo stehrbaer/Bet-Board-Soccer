@@ -21,6 +21,8 @@ def test_choose_numeric_feature_columns_excludes_leakage() -> None:
             "match_id": ["a", "b", "c"],
             "safe_feature": [1.0, 2.0, 4.0],
             "home_score": [1, 0, 2],
+            "home_odds_decimal": [1.5, 1.7, 1.9],
+            "odds_consensus_home_moneyline": [-120, -110, -105],
             "result_target": [0, 1, 2],
             "another_safe_feature": [10.0, 9.0, 7.0],
         }
@@ -29,6 +31,8 @@ def test_choose_numeric_feature_columns_excludes_leakage() -> None:
     assert "safe_feature" in cols
     assert "another_safe_feature" in cols
     assert "home_score" not in cols
+    assert "home_odds_decimal" not in cols
+    assert "odds_consensus_home_moneyline" not in cols
     assert "result_target" not in cols
 
 
